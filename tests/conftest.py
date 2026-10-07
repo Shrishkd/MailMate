@@ -1,3 +1,5 @@
+import socket
+
 import pytest
 
 from mailmate import db
@@ -11,6 +13,16 @@ FAKE_DNS = {
     "parkedsite.com": DomainResult("no_mail", "the domain says it accepts no email (null MX)"),
     "slowdns.in": DomainResult("unknown", "couldn't check the domain (Timeout)"),
 }
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """Rule 9: no test may reach a real webhook, Gmail, DNS or model. Any attempt fails loudly."""
+    def refuse(*args, **kwargs):
+        raise RuntimeError("tests must not use the network; use a fake (httpx.MockTransport, fake_dns)")
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
 
 
 @pytest.fixture

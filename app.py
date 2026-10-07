@@ -10,12 +10,11 @@ import pandas as pd
 import streamlit as st
 
 from mailmate import db
+from mailmate.config import DB_PATH, ConfigError, n8n_settings
 from mailmate.emailcheck import DnsDomainChecker
 from mailmate.importer import FIELD_LABELS, SUPPORTED, ImportReport, analyse
+from mailmate.n8n import N8nClient, N8nError
 from mailmate.templates import FIELDS, Template, check_template, latest_templates, merge, save_template, values_for
-
-ROOT = Path(__file__).resolve().parent
-DB_PATH = ROOT / "data" / "mailmate.db"
 
 st.set_page_config(page_title="MailMate", page_icon="✉️", layout="wide")
 conn = db.connect(DB_PATH)
@@ -109,6 +108,48 @@ SAMPLE_CONTACT = {"name": "Priya Sharma", "company": "Example Corp", "role": "Ge
 SAMPLE_LINE = "I also saw that Example Corp recently launched an AI assistant for home buyers."
 
 
+def _field(contact, key: str) -> str:
+    return (contact[key] or "") if key in contact.keys() else ""
+
+
+def _ask_w1(contact, label: str) -> None:
+    """Button callback: runs before the page redraws, so it can fill the personal-line box."""
+    st.session_state.w1 = {"for": label, "error": "", "result": None}
+    try:
+        client = N8nClient(n8n_settings())
+    except ConfigError as exc:
+        st.session_state.w1["error"] = str(exc)
+        return
+    try:
+        with st.spinner(f"W1 is researching {contact['company']} (usually 10-40 s)..."):
+            result = client.personalize(contact["company"], contact["role"],
+                                        _field(contact, "requirements"), _field(contact, "job_url"))
+    except N8nError as exc:
+        st.session_state.w1["error"] = str(exc)
+        return
+    finally:
+        client.close()
+    st.session_state.w1["result"] = result
+    st.session_state.personal_line = result.sentence
+
+
+def _show_w1_result(label: str) -> None:
+    w1 = st.session_state.get("w1")
+    if not w1 or w1["for"] != label:
+        return
+    if w1["error"]:
+        st.error(f"W1 failed: {w1['error']}")
+        return
+    result = w1["result"]
+    if not result.search_ok:
+        st.warning("W1's web search found nothing usable, so there is no personal line.")
+    elif not result.sentence:
+        st.warning("No source was clearly about this company, so W1 wrote no personal line.")
+    st.caption(f"From W1 ({result.model}). Not checked yet: Step 4 adds the checks against these sources.")
+    for s in result.sources:
+        st.markdown(f"[S{s.id}] [{s.title}]({s.url})")
+
+
 def page_templates():
     st.title("Templates")
     settings = db.get_settings(conn)
@@ -154,9 +195,13 @@ def page_templates():
         if not options:
             st.caption("No contacts imported yet, so the preview uses a sample contact.")
             options = {"Sample: Priya Sharma, Example Corp": SAMPLE_CONTACT}
-        contact = options[st.selectbox("Preview with", list(options))]
-        personal = st.text_input("Personal line (from Step 3, W1 writes one per contact)", SAMPLE_LINE,
-                                 help="Clear it to see the email without a personal line.")
+        label = st.selectbox("Preview with", list(options))
+        contact = options[label]
+        st.session_state.setdefault("personal_line", SAMPLE_LINE)
+        personal = st.text_input("Personal line", key="personal_line",
+                                 help="W1 writes one per contact. Clear it to see the email without one.")
+        st.button("Ask W1 for this contact's personal line", on_click=_ask_w1, args=(contact, label))
+        _show_w1_result(label)
         email = merge(Template(name=name or "draft", subject=subject, body=body),
                       values_for(contact, settings, personal))
         if not email.ok:

@@ -21,6 +21,12 @@ pytest
 streamlit run app.py        # http://localhost:8501, this machine only
 ```
 
+Check the live n8n W1 workflow (calls real n8n and Ollama; not part of `pytest`):
+
+```powershell
+python scripts/check_w1.py
+```
+
 ## Layout
 
 | Path | What |
@@ -28,5 +34,6 @@ streamlit run app.py        # http://localhost:8501, this machine only
 | `app.py` | Streamlit app (localhost only) |
 | `mailmate/` | Python package |
 | `n8n/workflows/` | Exported n8n workflows (no secrets) |
+| `scripts/` | Manual checks against the live workflows |
 | `data/` | Personal data and the SQLite database (git-ignored) |
 | `tests/` | `pytest` suite; never calls real webhooks, Gmail or models |

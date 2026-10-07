@@ -8,7 +8,7 @@ from mailmate.templates import (FIELDS, OPT_OUT_LINE, Template, check_template, 
 
 BODY = """Hey {first_name},
 
-I recently came across the news that **{company}** is hiring for the **{role}** role.
+I recently came across the news that {company} is hiring for the {role} role.
 
 {personal_line}
 
@@ -62,7 +62,7 @@ def test_full_merge():
     assert email.subject == "GenAI Engineer at Nimbus Labs?"
     assert email.body_text == """Hey Priya,
 
-I recently came across the news that **Nimbus Labs** is hiring for the **GenAI Engineer** role.
+I recently came across the news that Nimbus Labs is hiring for the GenAI Engineer role.
 
 Your new retrieval API caught my eye.
 
@@ -131,10 +131,13 @@ def test_opt_out_line_goes_last_without_a_signature():
     assert merge(template, VALUES).body_text == f"Hello Nimbus Labs.\n\n{OPT_OUT_LINE}"
 
 
-def test_plain_text_keeps_bold_markers_and_html_renders_them():
+def test_bold_markers_are_refused_because_plain_text_shows_them():
+    assert check_template("Hi", "Hello **{company}**") == [
+        "'**' in the body: emails are sent as plain text, where Gmail shows the asterisks instead of bold"]
+
+
+def test_html_makes_links_clickable():
     email = merge(TEMPLATE, VALUES)
-    assert "**Nimbus Labs**" in email.body_text
-    assert "<b>Nimbus Labs</b>" in email.body_html
     assert '<a href="https://github.com/example">https://github.com/example</a>' in email.body_html
 
 

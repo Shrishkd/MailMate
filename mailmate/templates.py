@@ -71,6 +71,9 @@ def check_template(subject: str, body: str) -> list[str]:
         for placeholder in _MANUAL_PLACEHOLDER.findall(text):
             errors.append(f"'{placeholder}' in the {where} looks like a placeholder to fill by hand; "
                           f"use a merge field such as {{company}}")
+        if "**" in text:
+            errors.append(f"'**' in the {where}: emails are sent as plain text, where Gmail shows "
+                          f"the asterisks instead of bold")
     return errors
 
 
