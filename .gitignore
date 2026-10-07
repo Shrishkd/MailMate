@@ -1,0 +1,15 @@
+# Private working notes.
+BUILD_PROMPT.md
+MAIL_TEMPELATE.md
+N8N_SETUP.md
+
+# Personal data: recruiter lists, replies, the database. Never commit.
+data/
+
+# Secrets (webhook token). Never commit.
+.env
+
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/

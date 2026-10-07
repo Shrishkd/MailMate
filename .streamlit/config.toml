@@ -1,0 +1,8 @@
+# MailMate holds personal data (recruiter lists, replies) and can send email.
+# Serve it to this machine only - Streamlit's default listens on the whole network.
+[server]
+address = "localhost"
+headless = true
+
+[browser]
+gatherUsageStats = false
