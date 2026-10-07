@@ -3,6 +3,7 @@
 [server]
 address = "localhost"
 headless = true
+maxUploadSize = 5   # MB; job lists are small
 
 [browser]
 gatherUsageStats = false
