@@ -114,6 +114,13 @@ CREATE TABLE IF NOT EXISTS suppression (
     created_at  TEXT NOT NULL
 );
 
+-- Personal settings (name, signature...). Kept here, not in code, because data/ is git-ignored.
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 -- Append-only timeline. The dashboard is computed from it.
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY,
@@ -155,6 +162,18 @@ def log_event(conn: sqlite3.Connection, kind: str, *, contact_id: int | None = N
         "INSERT INTO events (kind, contact_id, email_id, batch_id, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         (kind, contact_id, email_id, batch_id, json.dumps(detail), now()),
     )
+
+
+def get_settings(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+
+
+def set_settings(conn: sqlite3.Connection, **values: str) -> None:
+    with conn:
+        for key, value in values.items():
+            conn.execute("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)"
+                         " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                         (key, value.replace("\r\n", "\n").strip(), now()))
 
 
 def known_contacts(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:

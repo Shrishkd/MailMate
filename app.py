@@ -12,6 +12,7 @@ import streamlit as st
 from mailmate import db
 from mailmate.emailcheck import DnsDomainChecker
 from mailmate.importer import FIELD_LABELS, SUPPORTED, ImportReport, analyse
+from mailmate.templates import FIELDS, Template, check_template, latest_templates, merge, save_template, values_for
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "data" / "mailmate.db"
@@ -104,10 +105,75 @@ def page_contacts():
         st.dataframe(blocked, hide_index=True, width="stretch")
 
 
+SAMPLE_CONTACT = {"name": "Priya Sharma", "company": "Example Corp", "role": "Generative AI Engineer"}
+SAMPLE_LINE = "I also saw that Example Corp recently launched an AI assistant for home buyers."
+
+
+def page_templates():
+    st.title("Templates")
+    settings = db.get_settings(conn)
+    with st.expander("Your details: {my_name} and {signature}", expanded=not settings.get("my_name")):
+        with st.form("details"):
+            my_name = st.text_input("Your name", settings.get("my_name", ""))
+            signature = st.text_area("Signature", settings.get("signature", ""), height=130,
+                                     help="Replaces {signature}. The opt-out line is added just above it.")
+            if st.form_submit_button("Save details"):
+                db.set_settings(conn, my_name=my_name, signature=signature)
+                st.rerun()
+
+    templates = latest_templates(conn)
+    choice = st.selectbox("Template", [t.name for t in templates] + ["+ New template"])
+    current = next((t for t in templates if t.name == choice), None)
+    edit, preview = st.columns(2, gap="large")
+
+    with edit:
+        name = st.text_input("Name", current.name if current else "", disabled=current is not None,
+                             key=f"name_{choice}")
+        subject = st.text_input("Subject", current.subject if current else "", key=f"subject_{choice}")
+        body = st.text_area("Body", current.body if current else "", height=560, key=f"body_{choice}")
+        st.caption("Merge fields: " + " ".join(f"`{{{f}}}`" for f in FIELDS)
+                   + ". The opt-out line is added automatically above `{signature}`.")
+        problems = check_template(subject, body)
+        for problem in problems:
+            st.error(problem)
+        if current:
+            st.caption(f"Version {current.version}. Saving a change creates version {current.version + 1}; "
+                       "earlier versions are kept for the reply-rate comparison.")
+        if st.button("Save template", type="primary", disabled=bool(problems) or not name.strip()):
+            try:
+                saved = save_template(conn, name, subject, body)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success(f"Saved '{saved.name}', version {saved.version}.")
+
+    with preview:
+        st.subheader("Preview")
+        contacts = conn.execute("SELECT * FROM contacts ORDER BY id DESC LIMIT 200").fetchall()
+        options = {f"{c['company']} · {c['role']} · {c['email']}": c for c in contacts}
+        if not options:
+            st.caption("No contacts imported yet, so the preview uses a sample contact.")
+            options = {"Sample: Priya Sharma, Example Corp": SAMPLE_CONTACT}
+        contact = options[st.selectbox("Preview with", list(options))]
+        personal = st.text_input("Personal line (from Step 3, W1 writes one per contact)", SAMPLE_LINE,
+                                 help="Clear it to see the email without a personal line.")
+        email = merge(Template(name=name or "draft", subject=subject, body=body),
+                      values_for(contact, settings, personal))
+        if not email.ok:
+            for error in email.errors:
+                st.warning(error)
+            return
+        st.text(f"Subject: {email.subject}")
+        as_text, as_html = st.tabs(["Plain text (what gets sent)", "HTML"])
+        as_text.code(email.body_text, language=None, wrap_lines=True)
+        as_html.html(email.body_html)
+
+
 contact_count = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
 nav = st.navigation([
     st.Page(page_upload, title="Upload", icon="📤", default=True),
     st.Page(page_contacts, title=f"Contacts ({contact_count})", icon="👥"),
+    st.Page(page_templates, title="Templates", icon="📝"),
 ])
 nav.run()
 conn.close()
