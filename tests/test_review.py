@@ -212,3 +212,15 @@ def test_approve_all_needs_five_samples_and_skips_drafts_with_problems(conn, set
     assert "look at 5 drafts first (4 so far)" in review.bulk_approval_status(conn, reviewed=4)[1]
     assert review.approve_all_clean(conn, reviewed=5) == (1, 1)
     assert (status(conn, clean), status(conn, flawed)) == ("approved", "draft")
+
+
+def test_emails_from_an_older_template_version_can_be_rebuilt(conn, setup):
+    email_id = draft(conn, setup)
+    review.approve(conn, email_id)
+    newer = save_template(conn, "cold", "{role} at {company}?", BODY.replace("I am {my_name}.", "I'm {my_name}."))
+    assert review.outdated(conn) == [(email_id, newer)]
+    review.rebuild_with_template(conn, email_id, newer)
+    row = conn.execute("SELECT * FROM emails WHERE id = ?", (email_id,)).fetchone()
+    assert row["template_id"] == newer.id and row["status"] == "draft"
+    assert "I'm Shrish." in row["body_text"] and GOOD_LINE in row["body_text"]
+    assert review.outdated(conn) == []

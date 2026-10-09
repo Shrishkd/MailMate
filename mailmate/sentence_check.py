@@ -84,6 +84,12 @@ _CLICHES = re.compile(r"""
   | \bawesome\b | \bpassionate\b | \blove\s+what\b | \bkudos\b
 """, re.I | re.X)
 
+# The line must say why the development makes me want to apply, not only state it.
+_MOTIVATION = re.compile(r"""\b(?:appl(?:y|ying|ied)|join(?:ing)?|work\s+on|be\s+part\s+of|contribut\w*|want\s+to|
+    would\s+love\s+to|dr[ae]w\s+me|draws\s+me|drawn\s+to|excites?\s+me|exciting|attract\w*|reason|why\s+I|
+    made\s+me|makes\s+me|pulled\s+me|the\s+kind\s+of\s+work|the\s+work\s+I)\b""", re.I | re.X)
+MAX_FIGURES = 2
+
 _PLACEHOLDER_CHARS = re.compile(r"[{}\[\]<>]")
 _PLACEHOLDER_WORDS = re.compile(r"\b(?:X{2,}|TBD|TODO|lorem\s+ipsum|company\s+name|role\s+name|recruiter\s+name|"
                                 r"first\s+name|your\s+name|insert\s+\w+)\b", re.I)
@@ -205,6 +211,13 @@ def check_sentence(raw: str, sources: list[Source], *, company: str, role: str =
                         "not the job requirements")
     if not _names_company(sentence, company):
         problems.append(f"it doesn't name {company}, so it may be about a different company")
+    if not _MOTIVATION.search(sentence):
+        problems.append("it states a fact but not why it makes me want to apply or join; link the development "
+                        "to the work I'd do in the role")
+    figures = _NUMBER.findall(sentence)
+    if len(figures) > MAX_FIGURES:
+        problems.append(f"it lists {len(figures)} figures ({', '.join(figures)}); use at most {MAX_FIGURES}, "
+                        "a line full of statistics reads like a report")
 
     # Grounding: everything checkable must appear in a cited source that isn't a job ad.
     usable = [s for s in sources if not is_job_ad(s.url)]

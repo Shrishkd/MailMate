@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from mailmate import db
 from mailmate.n8n import Source
 from mailmate.sentence_check import PersonalLine, check_sentence
-from mailmate.templates import OPT_OUT_LINE, Template, merge, values_for
+from mailmate.templates import OPT_OUT_LINE, Template, latest_templates, merge, values_for
 
 INDIVIDUAL_BATCHES = 2      # real batches that must be approved one email at a time
 SAMPLES_BEFORE_BULK = 5     # drafts I must look at before "approve all" unlocks
@@ -186,6 +186,30 @@ def set_personal_line(conn: sqlite3.Connection, email_id: int, sentence: str,
                      (sentence, source_json, merged.subject, merged.body_text, email_id))
         db.log_event(conn, "draft_edited", contact_id=row["contact_id"], email_id=email_id, what="personal line",
                      sentence=sentence)
+
+
+def outdated(conn: sqlite3.Connection) -> list[tuple[int, Template]]:
+    """Drafts and approved emails built from an older version of their template, with the newest version."""
+    rows = conn.execute(
+        "SELECT e.id, t.name, t.version FROM emails e JOIN templates t ON t.id = e.template_id"
+        " WHERE e.status IN ('draft', 'approved')").fetchall()
+    newest = {t.name: t for t in latest_templates(conn)}
+    return [(r["id"], newest[r["name"]]) for r in rows if newest[r["name"]].version > r["version"]]
+
+
+def rebuild_with_template(conn: sqlite3.Connection, email_id: int, template: Template) -> None:
+    """Re-merge with another template version, keeping the personal line. Back to draft: the
+    text changed, so it needs approving again. Hand edits are replaced."""
+    row = _email(conn, email_id)
+    _editable(row)
+    merged = merge(template, values_for(row, db.get_settings(conn), row["sentence"]))
+    if not merged.ok:
+        raise ReviewError("; ".join(merged.errors))
+    with conn:
+        conn.execute("UPDATE emails SET template_id = ?, subject = ?, body_text = ?, status = 'draft',"
+                     " approved_at = NULL WHERE id = ?", (template.id, merged.subject, merged.body_text, email_id))
+        db.log_event(conn, "draft_edited", contact_id=row["contact_id"], email_id=email_id,
+                     what=f"rebuilt with {template.name} v{template.version}")
 
 
 def edit_text(conn: sqlite3.Connection, email_id: int, subject: str, body: str) -> None:

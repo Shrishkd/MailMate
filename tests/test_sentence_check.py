@@ -41,10 +41,10 @@ def test_typography_is_made_plain_ascii():
 
 
 @pytest.mark.parametrize("sentence", [
-    "Nimbus Labs hiring 40 researchers for its Pune lab shows how seriously it takes Indic speech.",   # number in source
-    "Kestrel-7B topping the IndicBench leaderboard is a strong signal for Nimbus Labs' Indic focus.",  # name + digits
+    "Nimbus Labs hiring 40 researchers for its Pune lab is what made me apply.",   # number in source
+    "Kestrel-7B topping the IndicBench leaderboard is why I want to join Nimbus Labs.",  # name + digits
     "Nimbus Labs serving millions of users in India with Indic speech models is the work I want to do.",
-    "Nimbus Labs being one of the fastest growing AI startups in India makes its Pune lab news stand out.",
+    "Nimbus Labs being one of the fastest growing AI startups in India is the reason I'm applying.",
 ])
 def test_numbers_names_and_superlatives_from_a_cited_source_are_fine(sentence):
     assert check(sentence).ok, check(sentence).problems
@@ -116,6 +116,28 @@ def test_tools_from_the_requirements_are_rejected_even_if_a_source_has_them():
 
 def test_requirement_phrases_are_rejected():
     assert "Indic speech" in problems(GOOD, requirements="Indic speech, PyTorch")
+
+
+def test_the_line_must_say_why_it_makes_me_want_to_apply():
+    assert "not why it makes me want to apply" in problems(
+        "Nimbus Labs opened a research lab in Pune focused on Indic speech models.")
+
+
+@pytest.mark.parametrize("sentence", [
+    "Nimbus Labs opening a Pune lab for Indic speech models is what made me apply.",
+    "Seeing Nimbus Labs open a Pune lab for Indic speech models is the reason I'm applying.",
+    "Nimbus Labs' new Pune lab for Indic speech models excites me, since that is the work I want to do.",
+    "Nimbus Labs' Pune lab for Indic speech models drew me to the GenAI Engineer role.",
+])
+def test_ways_of_saying_why(sentence):
+    assert check(sentence).ok, check(sentence).problems
+
+
+def test_a_line_full_of_statistics_is_rejected():
+    many = NEWS.model_copy(update={"content": NEWS.content + " Accuracy rose from 48.6% to 80.0% and errors fell from 35.0% to 8.0%."})
+    assert "lists 4 figures (48.6%, 80.0%, 35.0%, 8.0%); use at most 2" in problems(
+        "Nimbus Labs raising accuracy from 48.6% to 80.0% and cutting errors from 35.0% to 8.0% made me apply.",
+        sources=(many,))
 
 
 def test_the_company_must_be_named():

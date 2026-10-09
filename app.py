@@ -406,6 +406,14 @@ def page_review():
     c2.metric("Drafts with problems", sum(not checks[r["id"]].clean for r in drafts))
     c3.metric("Approved", len(queue) - len(drafts))
 
+    if old := review.outdated(conn):
+        st.warning(f"{len(old)} email(s) were built from an older template version. Rebuilding keeps each personal "
+                   "line, uses the newest version, and puts the email back to draft for approval.")
+        if st.button(f"Rebuild {len(old)} email(s) with the newest template"):
+            for email_id, template in old:
+                review.rebuild_with_template(conn, email_id, template)
+            st.rerun()
+
     reviewed: set = st.session_state.setdefault("reviewed", set())
     allowed, why = review.bulk_approval_status(conn, len(reviewed))
     if st.button("Approve all drafts with no problems", disabled=not allowed or not drafts,
