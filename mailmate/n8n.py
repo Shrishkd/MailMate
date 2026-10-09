@@ -6,6 +6,7 @@ won't change on retry (wrong token, workflow not published, workflow crashed) fa
 a message that says what to fix. Error messages never contain the token.
 """
 
+import json
 import time
 from typing import Callable
 
@@ -40,6 +41,12 @@ class Personalization(BaseModel):
     search_ok: bool = False
 
 
+class SendAccepted(BaseModel):
+    """W2's immediate answer: it took the batch. Sending itself goes on inside n8n."""
+    accepted: int
+    batch_id: int
+
+
 class N8nClient:
     def __init__(self, settings: N8nSettings, *, transport: httpx.BaseTransport | None = None,
                  retry_delays: tuple[float, ...] = RETRY_DELAYS, sleep: Callable[[float], None] = time.sleep):
@@ -54,19 +61,34 @@ class N8nClient:
     def _redact(self, text: str) -> str:
         return text.replace(self._settings.token, "***") if self._settings.token else text
 
-    def _post(self, path: str, payload: dict) -> dict:
+    def _post(self, path: str, *, json_body: dict | None = None, data: dict | None = None,
+              files: dict | None = None, repeatable: bool = True) -> dict:
+        """POST to a webhook. `repeatable=False` is for calls with side effects (sending email):
+        those are retried only when the request certainly never left this laptop, because a
+        lost answer could otherwise turn into a second send."""
         url = f"{self._settings.base_url}/webhook/{path}"
         last_problem = ""
         for attempt in range(len(self._retry_delays) + 1):
             if attempt:
                 self._sleep(self._retry_delays[attempt - 1])
             try:
-                response = self._http.post(url, json=payload, headers={TOKEN_HEADER: self._settings.token})
+                response = self._http.post(url, json=json_body, data=data, files=files,
+                                           headers={TOKEN_HEADER: self._settings.token})
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:   # never reached n8n
+                last_problem = f"network error ({type(exc).__name__})"
+                continue
             except httpx.TransportError as exc:
+                if not repeatable:
+                    raise N8nError(f"the connection broke after the request was sent ({type(exc).__name__}). "
+                                   "It may or may not have reached n8n: check n8n -> Executions before trying "
+                                   "again, so nothing is sent twice.") from None
                 last_problem = f"network error ({type(exc).__name__})"
                 continue
             status = response.status_code
             if status in _RETRY_STATUS:
+                if not repeatable:
+                    raise N8nError(f"n8n answered {status}. The request may have started the workflow: check "
+                                   "n8n -> Executions before trying again, so nothing is sent twice.")
                 last_problem = f"n8n answered {status}"
                 continue
             if status in (401, 403):
@@ -85,6 +107,21 @@ class N8nClient:
         tries = len(self._retry_delays) + 1
         raise N8nError(f"couldn't reach n8n after {tries} tries: {last_problem}. Check your internet connection.")
 
+    def send_batch(self, payload: dict, resume: bytes, resume_name: str = "resume.pdf") -> SendAccepted:
+        """Hand a batch to W2. W2 answers at once and keeps sending in n8n for minutes or hours."""
+        data = self._post("MailMate-send", data={"payload": json.dumps(payload)},
+                          files={"resume": (resume_name, resume, "application/pdf")}, repeatable=False)
+        if isinstance(data, list) and len(data) == 1:
+            data = data[0]
+        try:
+            accepted = SendAccepted.model_validate(data)
+        except ValidationError as exc:
+            raise N8nError(f"W2 answered in an unexpected shape: {exc.errors()[0]['msg']}") from None
+        if accepted.batch_id != payload["batch_id"] or accepted.accepted != len(payload["emails"]):
+            raise N8nError(f"W2 accepted {accepted.accepted} email(s) of batch {accepted.batch_id}, but MailMate "
+                           f"sent {len(payload['emails'])} of batch {payload['batch_id']}; check n8n -> Executions")
+        return accepted
+
     def personalize(self, company: str, role: str, requirements: str = "", job_url: str = "",
                     feedback: str = "") -> Personalization:
         """`feedback`: why the previous sentence was rejected, so the retry can fix it."""
@@ -93,7 +130,7 @@ class N8nClient:
             payload["job_url"] = job_url
         if feedback:
             payload["feedback"] = feedback
-        data = self._post("MailMate-personalize", payload)
+        data = self._post("MailMate-personalize", json_body=payload)
         if isinstance(data, list) and len(data) == 1:   # some n8n respond modes wrap the item in a list
             data = data[0]
         try:

@@ -9,12 +9,13 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from mailmate import db, review
-from mailmate.config import DB_PATH, ConfigError, n8n_settings
+from mailmate import db, review, sending
+from mailmate.config import DB_PATH, RESUME_PATH, ConfigError, n8n_settings, test_address
 from mailmate.emailcheck import DnsDomainChecker
 from mailmate.importer import FIELD_LABELS, SUPPORTED, ImportReport, analyse, job_sheets
 from mailmate.n8n import N8nClient, N8nError
 from mailmate.review import ReviewError
+from mailmate.sending import SendError
 from mailmate.sentence_check import PersonalLine, is_job_ad, personalize_checked
 from mailmate.templates import FIELDS, Template, check_template, latest_templates, merge, save_template, values_for
 
@@ -463,6 +464,89 @@ def page_review():
         _review_actions(email_id, row, check)
     _review_edit(email_id, row, settings)
 
+def page_send():
+    st.title("Send")
+    st.caption("Step 6: test emails to your own secondary inbox only. Real sending to recruiters comes in Step 7.")
+    try:
+        test_to = test_address()
+    except ConfigError as exc:
+        st.error(str(exc))
+        return
+    settings = db.get_settings(conn)
+
+    st.subheader("1. Resume")
+    if RESUME_PATH.exists():
+        size_kb = RESUME_PATH.stat().st_size / 1024
+        st.write(f"Attached to every email: **{settings.get('resume_name', 'resume.pdf')}** ({size_kb:.0f} KB)")
+    upload = st.file_uploader("Upload a new resume (PDF)" if RESUME_PATH.exists() else "Upload your resume (PDF)",
+                              type=["pdf"])
+    if upload is not None and st.button("Save resume"):
+        try:
+            for warning in sending.save_resume(conn, upload.getvalue(), RESUME_PATH, upload.name):
+                st.warning(warning)
+        except SendError as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
+
+    st.subheader("2. Test email")
+    candidates = sending.testable_emails(conn)
+    if not RESUME_PATH.exists():
+        st.info("Upload your resume first.")
+    elif not candidates:
+        st.info("Create a draft on the Review page first; a test sends the exact text of a draft or approved email.")
+    else:
+        options = {r["id"]: r for r in candidates}
+        chosen = st.multiselect(
+            f"Emails to send as a test (1-{sending.MAX_TEST_EMAILS}, same template version)", list(options),
+            default=list(options)[:1], max_selections=sending.MAX_TEST_EMAILS,
+            format_func=lambda i: f"#{i} {options[i]['template_name']} v{options[i]['version']} · "
+                                  f"{options[i]['company']} · {options[i]['status']}")
+        lo, hi = sending.TEST_SPACING_S
+        st.caption(f"Each goes to **{test_to}** only (not to the recruiter), with your resume attached, "
+                   f"{lo}-{hi} s apart. Nothing about the original emails changes.")
+        if st.button(f"Send {len(chosen)} test email(s) to {test_to}", type="primary", disabled=not chosen):
+            try:
+                client = N8nClient(n8n_settings())
+            except ConfigError as exc:
+                st.error(str(exc))
+            else:
+                try:
+                    batch = sending.send_test(conn, client, chosen, test_to, RESUME_PATH.read_bytes(),
+                                              settings.get("resume_name", "resume.pdf"))
+                    st.success(f"W2 accepted test batch #{batch.batch_id}. The first email should arrive within a "
+                               "minute; n8n -> Executions shows progress.")
+                except (SendError, N8nError) as exc:
+                    st.error(f"Not sent: {exc}")
+                finally:
+                    client.close()
+
+    st.subheader("3. Check what arrived")
+    batches = sending.test_batches(conn)
+    if not batches:
+        st.caption("No test batches yet.")
+        return
+    st.dataframe(pd.DataFrame([{"Batch": b["id"], "Template": f"{b['template_name']} v{b['version']}",
+                                "Status": b["status"], "Sent at": b["submitted_at"] or "",
+                                "Test checked": b["test_checked_at"] or ""} for b in batches]),
+                 hide_index=True, width="stretch")
+    unchecked = {b["template_id"]: f"{b['template_name']} v{b['version']}" for b in batches
+                 if b["status"] == "submitted" and not b["test_checked_at"]}
+    if unchecked:
+        template_id = st.selectbox("Template version you checked", list(unchecked), format_func=unchecked.get)
+        st.markdown(f"Open **{test_to}** and confirm every point:")
+        ticks = [st.checkbox(text, key=f"tick_{template_id}_{i}") for i, text in enumerate((
+            "The email arrived (check Spam too) and the text looks right",
+            "The resume PDF is attached and opens",
+            "In the sending account (Sent folder) it carries the MailMate label",
+            "There is no 'This email was sent automatically with n8n' footer",
+            "With more than one email: they arrived minutes apart, not all at once",
+        ))]
+        if st.button(f"Mark {unchecked[template_id]} as test-checked", disabled=not all(ticks)):
+            sending.mark_test_checked(conn, template_id)
+            st.rerun()
+
+
 contact_count = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
 draft_count = conn.execute("SELECT COUNT(*) FROM emails WHERE status = 'draft'").fetchone()[0]
 nav = st.navigation([
@@ -470,6 +554,7 @@ nav = st.navigation([
     st.Page(page_contacts, title=f"Contacts ({contact_count})", icon="👥"),
     st.Page(page_templates, title="Templates", icon="📝"),
     st.Page(page_review, title=f"Review ({draft_count})", icon="✅"),
+    st.Page(page_send, title="Send", icon="📨"),
 ])
 nav.run()
 conn.close()

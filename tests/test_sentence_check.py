@@ -83,6 +83,14 @@ def test_shape_problems(sentence, problem):
     assert problem in problems(sentence)
 
 
+def test_a_company_name_that_looks_like_a_domain_is_not_a_link():
+    lab = NEWS.model_copy(update={"title": "Lexsi.ai opens research lab in Pune",
+                                  "content": NEWS.content.replace("Nimbus Labs", "Lexsi.ai")})
+    sentence = "Lexsi.ai opening a Pune lab for Indic speech models is what made me apply."
+    assert check(sentence, sources=(lab,), company="Lexsi.ai").ok
+    assert "link" in problems(sentence.replace("apply.", "apply, see lexsi.ai/lab."), sources=(lab,), company="Lexsi.ai")
+
+
 def test_abbreviations_are_not_sentence_ends():
     assert check("Nimbus Labs Inc. opening a Pune lab for Indic speech models fits the work I want to do.").ok
 

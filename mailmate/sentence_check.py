@@ -190,7 +190,11 @@ def check_sentence(raw: str, sources: list[Source], *, company: str, role: str =
         problems.append("it is more than one sentence")
     if _PLACEHOLDER_CHARS.search(sentence) or _PLACEHOLDER_WORDS.search(sentence):
         problems.append("it contains a placeholder or bracket")
-    if _LINK.search(sentence) or _EMAIL.search(sentence) or _PHONE.search(sentence):
+    # A company called "Polynomial.AI" or "Lexsi.ai" is a name, not a link.
+    # Followed by a path ("lexsi.ai/lab") it is a link again.
+    without_name = (re.sub(r"(?<![\w./])" + re.escape(company.strip()) + r"(?![\w/])", "", sentence, flags=re.I)
+                    if company.strip() else sentence)
+    if _LINK.search(without_name) or _EMAIL.search(sentence) or _PHONE.search(sentence):
         problems.append("it contains a link, email address or phone number")
     if _GREETING.search(sentence) or _SIGN_OFF.search(sentence):
         problems.append("it contains a greeting, sign-off or other text that belongs elsewhere in the email")

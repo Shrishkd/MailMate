@@ -1,5 +1,6 @@
 """Paths and secrets. Secrets come only from the git-ignored .env and are never printed."""
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,3 +43,15 @@ def n8n_settings(env: dict[str, str] | None = None) -> N8nSettings:
     if not token:
         raise ConfigError("N8N_WEBHOOK_TOKEN is not set in .env")
     return N8nSettings(base_url=base_url, token=token)
+
+
+RESUME_PATH = PROJECT_ROOT / "data" / "resume.pdf"
+
+
+def test_address(env: dict[str, str] | None = None) -> str:
+    """Rule 2: my own secondary inbox. Test batches may only go here (W2 checks it again)."""
+    env = read_env_file() if env is None else env
+    address = env.get("MAILMATE_TEST_ADDRESS", "").strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[a-z]{2,}", address):
+        raise ConfigError("MAILMATE_TEST_ADDRESS is not set in .env (your own secondary inbox for test emails)")
+    return address
