@@ -85,10 +85,14 @@ class N8nClient:
         tries = len(self._retry_delays) + 1
         raise N8nError(f"couldn't reach n8n after {tries} tries: {last_problem}. Check your internet connection.")
 
-    def personalize(self, company: str, role: str, requirements: str = "", job_url: str = "") -> Personalization:
+    def personalize(self, company: str, role: str, requirements: str = "", job_url: str = "",
+                    feedback: str = "") -> Personalization:
+        """`feedback`: why the previous sentence was rejected, so the retry can fix it."""
         payload = {"company": company, "role": role, "requirements": requirements}
         if job_url:
             payload["job_url"] = job_url
+        if feedback:
+            payload["feedback"] = feedback
         data = self._post("MailMate-personalize", payload)
         if isinstance(data, list) and len(data) == 1:   # some n8n respond modes wrap the item in a list
             data = data[0]

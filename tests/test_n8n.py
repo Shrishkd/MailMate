@@ -44,6 +44,16 @@ def test_personalize_sends_the_secret_header_and_parses_the_answer():
     assert result.sentence == W1_ANSWER["sentence"] and result.sources[0].url == "https://news.example/nimbus"
 
 
+def test_retry_feedback_is_sent_only_when_given():
+    calls = []
+    client = client_for(httpx.Response(200, json=W1_ANSWER), httpx.Response(200, json=W1_ANSWER), calls=calls)
+    client.personalize("A", "B", job_url="https://a.example/job")
+    client.personalize("A", "B", feedback="too long")
+    assert json.loads(calls[0].content) == {"company": "A", "role": "B", "requirements": "",
+                                            "job_url": "https://a.example/job"}
+    assert json.loads(calls[1].content)["feedback"] == "too long"
+
+
 def test_answer_wrapped_in_a_list_is_accepted():
     assert client_for(httpx.Response(200, json=[W1_ANSWER])).personalize("A", "B").search_ok
 

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     requirements  TEXT NOT NULL DEFAULT '',
     email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
     name          TEXT NOT NULL DEFAULT '',
+    title         TEXT NOT NULL DEFAULT '',     -- the recruiter's own job title (context only)
     job_url       TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL DEFAULT 'new'
                   CHECK (status IN ({_statuses(CONTACT_STATUSES)})),
@@ -153,7 +154,15 @@ def connect(path: Path | str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Columns added after a database was first created. Only ever adds, never drops."""
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(contacts)")}
+    if "title" not in have:
+        conn.execute("ALTER TABLE contacts ADD COLUMN title TEXT NOT NULL DEFAULT ''")
 
 
 def log_event(conn: sqlite3.Connection, kind: str, *, contact_id: int | None = None,
@@ -211,9 +220,10 @@ def add_contacts(conn: sqlite3.Connection, contacts: list, source_file: str) -> 
                 continue
             try:
                 cur = conn.execute(
-                    "INSERT INTO contacts (company, role, requirements, email, name, job_url, source_file, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (c.company, c.role, c.requirements, email, c.name, c.job_url, source_file, now()),
+                    "INSERT INTO contacts (company, role, requirements, email, name, title, job_url, source_file, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (c.company, c.role, c.requirements, email, c.name, getattr(c, "title", ""), c.job_url,
+                     source_file, now()),
                 )
             except sqlite3.IntegrityError:  # already a contact
                 skipped.append(email)

@@ -61,7 +61,7 @@ def test_csv(conn, fake_dns):
     [row] = report.valid
     assert row.contact.model_dump() == {
         "company": "Nimbus Labs", "role": "GenAI Engineer", "requirements": "Python, RAG",
-        "email": "priya@nimbuslabs.ai", "name": "Priya", "job_url": "https://nimbuslabs.ai/j/1"}
+        "email": "priya@nimbuslabs.ai", "name": "Priya", "title": "", "job_url": "https://nimbuslabs.ai/j/1"}
 
 
 def test_xlsx(conn, fake_dns):
@@ -144,7 +144,6 @@ def test_row_errors(conn, fake_dns, field, value, error):
 
 @pytest.mark.parametrize("field, value, warning", [
     ("email", "careers@slowdns.in", "couldn't check the domain (Timeout); it will be checked again before sending"),
-    ("requirements", "", "no requirements; the personal sentence will be more generic"),
     ("job_url", "see LinkedIn", "job URL 'see LinkedIn' doesn't look like a web link"),
 ])
 def test_row_warnings_still_import(conn, fake_dns, field, value, warning):
@@ -214,5 +213,5 @@ def test_messy_file_gives_a_readable_report(conn, fake_dns):
     assert "couldn't check the domain" in by_row[9].warnings[0]
 
     text = report.as_text()
-    assert "5 will be imported, 9 rejected, 1 blank rows skipped" in text
+    assert "5 will be imported, 9 rejected, 1 blank or note rows skipped" in text
     assert "Recruiter email <- 'Recruiter E-mail'" in text

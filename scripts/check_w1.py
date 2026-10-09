@@ -26,6 +26,8 @@ DEFAULT_JOBS = [
 
 
 def main(argv: list[str]) -> int:
+    # The Windows console defaults to cp1252; model output often has characters like U+2011.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     try:
         settings = n8n_settings()
     except ConfigError as exc:

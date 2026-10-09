@@ -24,7 +24,8 @@ streamlit run app.py        # http://localhost:8501, this machine only
 Check the live n8n W1 workflow (calls real n8n and Ollama; not part of `pytest`):
 
 ```powershell
-python scripts/check_w1.py
+python scripts/check_w1.py          # W1 answers and refuses requests without the secret header
+python scripts/check_sentences.py   # W1 + MailMate's checks on the personal line, with retries
 ```
 
 ## Layout

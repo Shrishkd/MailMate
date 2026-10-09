@@ -2,6 +2,7 @@
 BUILD_PROMPT.md
 MAIL_TEMPELATE.md
 N8N_SETUP.md
+*.xlsx
 
 # Personal data: recruiter lists, replies, the database. Never commit.
 data/
