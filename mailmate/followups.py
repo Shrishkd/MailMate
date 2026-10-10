@@ -26,7 +26,7 @@ DEFAULT_BODY = """Hey {first_name},
 
 Just bringing my note about the {role} role at {company} back to the top of your inbox, in case it got buried under everything else.
 
-My resume is in the email below; I'd be glad to share anything else that helps.
+My resume is attached to my earlier email in this thread; I'd be glad to share anything else that helps.
 
 {signature}"""
 
