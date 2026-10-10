@@ -23,7 +23,12 @@ TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
 
 class N8nError(RuntimeError):
-    pass
+    """`maybe_sent`: the request may have reached n8n and started work (only for calls with side
+    effects). Then nothing may be assumed: check n8n -> Executions before retrying or releasing."""
+
+    def __init__(self, message: str, *, maybe_sent: bool = False):
+        super().__init__(message)
+        self.maybe_sent = maybe_sent
 
 
 class Source(BaseModel):
@@ -81,14 +86,14 @@ class N8nClient:
                 if not repeatable:
                     raise N8nError(f"the connection broke after the request was sent ({type(exc).__name__}). "
                                    "It may or may not have reached n8n: check n8n -> Executions before trying "
-                                   "again, so nothing is sent twice.") from None
+                                   "again, so nothing is sent twice.", maybe_sent=True) from None
                 last_problem = f"network error ({type(exc).__name__})"
                 continue
             status = response.status_code
             if status in _RETRY_STATUS:
                 if not repeatable:
                     raise N8nError(f"n8n answered {status}. The request may have started the workflow: check "
-                                   "n8n -> Executions before trying again, so nothing is sent twice.")
+                                   "n8n -> Executions before trying again, so nothing is sent twice.", maybe_sent=True)
                 last_problem = f"n8n answered {status}"
                 continue
             if status in (401, 403):
@@ -103,7 +108,8 @@ class N8nClient:
             try:
                 return response.json()
             except ValueError:
-                raise N8nError(f"n8n answered {status} but not with JSON: {self._redact(response.text[:200])!r}")
+                raise N8nError(f"n8n answered {status} but not with JSON: {self._redact(response.text[:200])!r}",
+                               maybe_sent=not repeatable)
         tries = len(self._retry_delays) + 1
         raise N8nError(f"couldn't reach n8n after {tries} tries: {last_problem}. Check your internet connection.")
 
@@ -116,10 +122,12 @@ class N8nClient:
         try:
             accepted = SendAccepted.model_validate(data)
         except ValidationError as exc:
-            raise N8nError(f"W2 answered in an unexpected shape: {exc.errors()[0]['msg']}") from None
+            raise N8nError(f"W2 answered in an unexpected shape: {exc.errors()[0]['msg']}; it got past its checks, "
+                           "so it may be sending: check n8n -> Executions", maybe_sent=True) from None
         if accepted.batch_id != payload["batch_id"] or accepted.accepted != len(payload["emails"]):
             raise N8nError(f"W2 accepted {accepted.accepted} email(s) of batch {accepted.batch_id}, but MailMate "
-                           f"sent {len(payload['emails'])} of batch {payload['batch_id']}; check n8n -> Executions")
+                           f"sent {len(payload['emails'])} of batch {payload['batch_id']}; check n8n -> Executions",
+                           maybe_sent=True)
         return accepted
 
     def personalize(self, company: str, role: str, requirements: str = "", job_url: str = "",

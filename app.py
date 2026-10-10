@@ -4,6 +4,7 @@ Nothing is sent from here without an explicit approval. Real sending is off by d
 """
 
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -526,11 +527,11 @@ def page_send():
     batches = sending.test_batches(conn)
     if not batches:
         st.caption("No test batches yet.")
-        return
-    st.dataframe(pd.DataFrame([{"Batch": b["id"], "Template": f"{b['template_name']} v{b['version']}",
-                                "Status": b["status"], "Sent at": b["submitted_at"] or "",
-                                "Test checked": b["test_checked_at"] or ""} for b in batches]),
-                 hide_index=True, width="stretch")
+    else:
+        st.dataframe(pd.DataFrame([{"Batch": b["id"], "Template": f"{b['template_name']} v{b['version']}",
+                                    "Status": b["status"], "Sent at": b["submitted_at"] or "",
+                                    "Test checked": b["test_checked_at"] or ""} for b in batches]),
+                     hide_index=True, width="stretch")
     unchecked = {b["template_id"]: f"{b['template_name']} v{b['version']}" for b in batches
                  if b["status"] == "submitted" and not b["test_checked_at"]}
     if unchecked:
@@ -546,6 +547,104 @@ def page_send():
         if st.button(f"Mark {unchecked[template_id]} as test-checked", disabled=not all(ticks)):
             sending.mark_test_checked(conn, template_id)
             st.rerun()
+
+    _real_sending(test_to, settings)
+
+
+def _send_rules_editor() -> sending.SendRules:
+    rules = sending.send_rules(conn)
+    with st.expander(f"Rules: at most {rules.daily_cap} a day, {rules.spacing_min_s // 60}-{rules.spacing_max_s // 60} "
+                     f"min apart, Mon-Fri {rules.window_start:%H:%M}-{rules.window_end:%H:%M} IST"):
+        with st.form("send_rules"):
+            c1, c2, c3 = st.columns(3)
+            cap = c1.number_input("Daily cap", 1, 50, rules.daily_cap)
+            lo = c2.number_input("Min gap (minutes)", 2, 60, rules.spacing_min_s // 60)
+            hi = c3.number_input("Max gap (minutes)", 2, 60, rules.spacing_max_s // 60)
+            c4, c5 = st.columns(2)
+            start = c4.time_input("Window opens (IST)", rules.window_start)
+            end = c5.time_input("Window closes (IST)", rules.window_end)
+            if st.form_submit_button("Save rules"):
+                try:
+                    sending.save_send_rules(conn, sending.SendRules(
+                        daily_cap=cap, spacing_min_s=lo * 60, spacing_max_s=hi * 60, window_start=start, window_end=end))
+                    st.rerun()
+                except SendError as exc:
+                    st.error(str(exc))
+    return rules
+
+
+def _real_sending(test_to: str, settings: dict[str, str]) -> None:
+    st.subheader("4. Real sending")
+    rules = _send_rules_editor()
+    now = datetime.now(timezone.utc)
+    local = now.astimezone(sending.IST)
+    sent_today = sending.queued_today(conn, now)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Sent today", f"{sent_today} / {rules.daily_cap}")
+    c2.metric("India time", f"{local:%a %H:%M}")
+    running = sending.running_batch(conn, now, rules)
+    c3.metric("Running batch", f"#{running[0]} until ~{running[1].astimezone(sending.IST):%H:%M}" if running else "none")
+
+    candidates = sending.sendable_emails(conn)
+    if not RESUME_PATH.exists():
+        st.info("Upload your resume first (step 1).")
+    elif not candidates:
+        st.info("No approved emails from a test-checked template version yet.")
+    else:
+        options = {r["id"]: r for r in candidates}
+        chosen = st.multiselect(
+            "Approved emails to send for real", list(options), max_selections=min(sending.MAX_BATCH, rules.daily_cap),
+            format_func=lambda i: f"#{i} {options[i]['company']} · {options[i]['name'] or '-'} · {options[i]['email']}")
+        if chosen:
+            plan = sending.plan_real_batch(conn, chosen, now, test_to)
+            for problem in plan.problems:
+                st.error(problem)
+            if plan.ok:
+                who = "your own test address only (self-test: window and weekdays don't apply)" if plan.self_test \
+                    else f"{len(chosen)} recruiter(s)"
+                st.warning(f"**This sends real email** to {who}, {rules.spacing_min_s // 60}-"
+                           f"{rules.spacing_max_s // 60} min apart, done by about "
+                           f"{plan.finishes_by.astimezone(sending.IST):%H:%M} IST. It can't be unsent.")
+                typed = st.text_input(f"Type {len(chosen)} to confirm", key=f"confirm_{'-'.join(map(str, chosen))}")
+                if st.button(f"Send {len(chosen)} real email(s)", type="primary",
+                             disabled=typed.strip() != str(len(chosen))):
+                    try:
+                        client = N8nClient(n8n_settings())
+                        with st.spinner("Handing the batch to W2... (one click is enough)"):
+                            batch = sending.send_real(conn, client, chosen, confirmed=int(typed), test_to=test_to,
+                                                      resume=RESUME_PATH.read_bytes(),
+                                                      resume_name=settings.get("resume_name", "resume.pdf"))
+                        client.close()
+                        st.success(f"W2 accepted batch #{batch.batch_id}. The emails are 'queued'; n8n sends them "
+                                   "one by one. n8n -> Executions shows progress.")
+                    except (ConfigError, SendError, N8nError) as exc:
+                        st.error(str(exc))
+
+    batches = sending.real_batches(conn)
+    if not batches:
+        return
+    st.dataframe(pd.DataFrame([{"Batch": b["id"], "Template": f"{b['template_name']} v{b['version']}",
+                                "Status": b["status"], "Emails": b["emails"], "Still queued": b["queued"],
+                                "Sent at": b["submitted_at"] or ""} for b in batches]), hide_index=True, width="stretch")
+    with st.expander("Stop a running batch, or release a failed one"):
+        st.markdown("**To stop a batch that is sending:** n8n → **Executions** → open the running "
+                    "`MailMate W2 Send` execution → **Stop**. Then tell MailMate below. Emails already sent stay sent; "
+                    "the reply sync (Step 8) finds out which ones went out.")
+        submitted = [b["id"] for b in batches if b["status"] == "submitted"]
+        if submitted:
+            batch_id = st.selectbox("Batch I stopped in n8n", submitted)
+            if st.button("I stopped it"):
+                sending.mark_stopped(conn, batch_id)
+                st.rerun()
+        failed = [b["id"] for b in batches if b["status"] == "failed" and b["queued"]]
+        if failed:
+            st.markdown("**A failed batch whose emails are still 'queued'** may or may not have sent something. "
+                        "Open n8n → Executions: if that batch's execution sent nothing, release its emails.")
+            batch_id = st.selectbox("Failed batch", failed)
+            sure = st.checkbox("I checked n8n Executions: nothing from this batch was sent")
+            if st.button("Release its emails back to approved", disabled=not sure):
+                sending.release_batch(conn, batch_id, nothing_sent_confirmed=sure, reason="checked in n8n")
+                st.rerun()
 
 
 contact_count = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]

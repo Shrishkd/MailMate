@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS emails (
     gmail_message_id  TEXT,                         -- what a follow-up replies to
     created_at        TEXT NOT NULL,
     approved_at       TEXT,
+    queued_at         TEXT,                         -- handed to W2 in a real batch (counts for the daily cap)
     sent_at           TEXT
 );
 
@@ -163,6 +164,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     have = {r["name"] for r in conn.execute("PRAGMA table_info(contacts)")}
     if "title" not in have:
         conn.execute("ALTER TABLE contacts ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+    if "queued_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(emails)")}:
+        conn.execute("ALTER TABLE emails ADD COLUMN queued_at TEXT")
 
 
 def log_event(conn: sqlite3.Connection, kind: str, *, contact_id: int | None = None,
