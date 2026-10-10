@@ -512,8 +512,9 @@ def page_send():
                 st.error(str(exc))
             else:
                 try:
-                    batch = sending.send_test(conn, client, chosen, test_to, RESUME_PATH.read_bytes(),
-                                              settings.get("resume_name", "resume.pdf"))
+                    with st.spinner("Handing the test to W2... (one click is enough)"):
+                        batch = sending.send_test(conn, client, chosen, test_to, RESUME_PATH.read_bytes(),
+                                                  settings.get("resume_name", "resume.pdf"))
                     st.success(f"W2 accepted test batch #{batch.batch_id}. The first email should arrive within a "
                                "minute; n8n -> Executions shows progress.")
                 except (SendError, N8nError) as exc:

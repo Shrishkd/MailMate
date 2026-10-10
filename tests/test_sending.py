@@ -57,6 +57,14 @@ def test_test_payload_sends_the_exact_text_to_the_test_address_only(conn, emails
     assert (payload["spacing_min_s"], payload["spacing_max_s"]) == sending.TEST_SPACING_S
 
 
+def test_each_email_also_goes_as_simple_html(conn, emails):
+    """Plain text gets hard-wrapped at ~76 characters on the way, so Gmail shows half-width lines;
+    the HTML version uses the full width. Same words, paragraphs kept."""
+    [email] = sending.build_test_payload(conn, emails[:1], TEST_TO, batch_id=1)["emails"]
+    assert email["body_html"].startswith("<p>Hey Priya,</p>")
+    assert "<p>Nimbus Labs rocks.</p>" in email["body_html"] and "Thanks,<br>" in email["body_html"]
+
+
 @pytest.mark.parametrize("pick, problem", [
     (lambda ids: [], "1 to 3 emails"),
     (lambda ids: ids * 2, "1 to 3 emails"),
@@ -120,6 +128,19 @@ def test_a_send_that_never_connected_is_retried(conn, emails):
 def test_w2_must_confirm_the_whole_batch(conn, emails):
     with pytest.raises(N8nError, match="W2 accepted 1 email"):
         sending.send_test(conn, w2(accepted(1)), emails, TEST_TO, PDF, "cv.pdf")
+
+
+def test_the_same_test_twice_in_a_row_is_refused(conn, emails, monkeypatch):
+    """Clicking Send again while the first click is still running must not send twice."""
+    calls = []
+    sending.send_test(conn, w2(accepted(1), accepted(1), calls=calls), emails[:1], TEST_TO, PDF, "cv.pdf")
+    with pytest.raises(SendError, match="this exact test went out 0 s ago"):
+        sending.send_test(conn, w2(accepted(1), calls=calls), emails[:1], TEST_TO, PDF, "cv.pdf")
+    assert len(calls) == 1
+    sending.send_test(conn, w2(accepted(2, batch_id=2), calls=calls), emails, TEST_TO, PDF, "cv.pdf")   # a different test is fine
+    monkeypatch.setattr(sending, "REPEAT_COOLDOWN_S", 0)     # after the cooldown it may go again
+    sending.send_test(conn, w2(accepted(1, batch_id=3), calls=calls), emails[:1], TEST_TO, PDF, "cv.pdf")
+    assert len(calls) == 3
 
 
 # --- resume ---------------------------------------------------------------------------------

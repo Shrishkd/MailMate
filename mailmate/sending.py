@@ -8,14 +8,17 @@ template version as test-checked; real sending (Step 7) requires that mark.
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from mailmate import db
 from mailmate.n8n import N8nClient, N8nError
+from mailmate.templates import to_html
 
 MAX_TEST_EMAILS = 3
+REPEAT_COOLDOWN_S = 300         # the same test again this soon is a double click, not a decision
 TEST_SPACING_S = (60, 120)          # short gaps, so a test shows the throttling without a long wait
 MAX_RESUME_BYTES = 5 * 1024 * 1024
 RESUME_WARN_BYTES = 1024 * 1024     # bigger attachments look more like spam
@@ -83,7 +86,8 @@ def build_test_payload(conn: sqlite3.Connection, email_ids: list[int], test_to: 
         "spacing_min_s": TEST_SPACING_S[0],
         "spacing_max_s": TEST_SPACING_S[1],
         "emails": [{"email_id": f"test-{batch_id}-{r['id']}", "to": test_to, "subject": r["subject"],
-                    "body_text": r["body_text"]} for r in sorted(rows, key=lambda r: email_ids.index(r["id"]))],
+                    "body_text": r["body_text"], "body_html": to_html(r["body_text"])}
+                   for r in sorted(rows, key=lambda r: email_ids.index(r["id"]))],
     }
 
 
@@ -91,6 +95,9 @@ def send_test(conn: sqlite3.Connection, client: N8nClient, email_ids: list[int],
               resume: bytes, resume_name: str) -> TestBatch:
     """Create a test batch, hand it to W2. The batch row records the outcome either way."""
     check_resume(resume)
+    if (repeat := recent_identical_test(conn, email_ids)) is not None:
+        raise SendError(f"this exact test went out {repeat} s ago (a double click?); check {test_to} first. "
+                        f"The same test can be sent again after {REPEAT_COOLDOWN_S // 60} minutes")
     template_id = conn.execute("SELECT template_id FROM emails WHERE id = ?", (email_ids[0],)).fetchone()
     if template_id is None:
         raise SendError("that email doesn't exist")
@@ -115,6 +122,17 @@ def send_test(conn: sqlite3.Connection, client: N8nClient, email_ids: list[int],
         db.log_event(conn, "test_batch_submitted", batch_id=batch_id, to=test_to, email_ids=email_ids,
                      emails=json.dumps([{"subject": e["subject"]} for e in payload["emails"]]))
     return TestBatch(batch_id=batch_id, template_id=template_id[0], email_ids=email_ids, to=test_to)
+
+
+def recent_identical_test(conn: sqlite3.Connection, email_ids: list[int]) -> int | None:
+    """Seconds since the same set of emails was last submitted as a test, if within the cooldown."""
+    now = datetime.now(timezone.utc)
+    for row in conn.execute("SELECT detail, created_at FROM events WHERE kind = 'test_batch_submitted'"
+                            " ORDER BY id DESC LIMIT 20"):
+        age = (now - datetime.fromisoformat(row["created_at"])).total_seconds()
+        if age < REPEAT_COOLDOWN_S and sorted(json.loads(row["detail"]).get("email_ids", [])) == sorted(email_ids):
+            return int(age)
+    return None
 
 
 def test_batches(conn: sqlite3.Connection) -> list[sqlite3.Row]:

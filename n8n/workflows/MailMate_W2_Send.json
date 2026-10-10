@@ -13,18 +13,24 @@
       "name": "Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [0, 300],
+      "position": [
+        0,
+        300
+      ],
       "webhookId": "6d1c3a52-1f0e-4c8e-9a51-0b7e2f1c0a99"
     },
     {
       "parameters": {
-        "jsCode": "// Safety checks before anything is sent. Any failure stops the whole batch with an error,\n// and because this runs before 'Respond to Webhook', MailMate shows that error.\nconst TEST_TO = 'REPLACE_WITH_YOUR_TEST_ADDRESS';  // your secondary inbox (MAILMATE_TEST_ADDRESS in .env)\nconst REAL_SENDING_ENABLED = false;                // Step 7 switches this on, after review\nconst MAX_BATCH = 20;                              // daily cap\n\nif (TEST_TO.startsWith('REPLACE')) throw new Error('Set TEST_TO at the top of the Explode + guard node first');\nconst wh = $('Webhook').first();\nlet payload;\ntry { payload = JSON.parse(wh.json.body.payload); } catch (err) { throw new Error('payload is not valid JSON'); }\nconst testMode = payload.test_mode === true;\nconst emails = payload.emails;\nif (!Array.isArray(emails) || emails.length === 0) throw new Error('No emails in the batch');\nif (emails.length > MAX_BATCH) throw new Error(`Batch of ${emails.length} is larger than ${MAX_BATCH} - refused`);\nif (!testMode && !REAL_SENDING_ENABLED) throw new Error('Real sending is not enabled in W2 yet (test mode only)');\n\n// The resume: whatever name n8n gave the uploaded file, pass it on as `resume`.\nconst files = wh.binary || {};\nconst key = Object.keys(files)[0];\nif (!key) throw new Error('No resume file received');\nconst resume = files[key];\nif (resume.mimeType && resume.mimeType !== 'application/pdf') throw new Error(`Resume must be a PDF, got ${resume.mimeType}`);\n\n// Spacing between sends, with a floor so a bad payload can't send in a burst.\nconst min = Math.max(Number(payload.spacing_min_s) || 180, testMode ? 30 : 120);\nconst max = Math.max(Number(payload.spacing_max_s) || 420, min);\n\nreturn emails.map(e => {\n  const to = String(e.to || '').trim().toLowerCase();\n  if (testMode && to !== TEST_TO.toLowerCase()) throw new Error(`Test mode may only send to the test address, got ${to}`);\n  if (!to || !e.subject || !e.body_text) throw new Error(`Email ${e.email_id} is missing to, subject or body_text`);\n  if (e.reply_to_message_id) throw new Error('Follow-ups are not supported yet (Step 9)');\n  return {\n    json: {\n      email_id: e.email_id, to, subject: e.subject, body_text: e.body_text,\n      test_mode: testMode, batch_id: payload.batch_id, sender_name: payload.sender_name || '',\n      spacing_min_s: min, spacing_max_s: max,\n    },\n    binary: { resume },\n  };\n});"
+        "jsCode": "// Safety checks before anything is sent. Any failure stops the whole batch with an error,\n// and because this runs before 'Respond to Webhook', MailMate shows that error.\nconst TEST_TO = 'REPLACE_WITH_YOUR_TEST_ADDRESS';  // your secondary inbox (MAILMATE_TEST_ADDRESS in .env)\nconst REAL_SENDING_ENABLED = false;                // Step 7 switches this on, after review\nconst MAX_BATCH = 20;                              // daily cap\n\nif (TEST_TO.startsWith('REPLACE')) throw new Error('Set TEST_TO at the top of the Explode + guard node first');\nconst wh = $('Webhook').first();\nlet payload;\ntry { payload = JSON.parse(wh.json.body.payload); } catch (err) { throw new Error('payload is not valid JSON'); }\nconst testMode = payload.test_mode === true;\nconst emails = payload.emails;\nif (!Array.isArray(emails) || emails.length === 0) throw new Error('No emails in the batch');\nif (emails.length > MAX_BATCH) throw new Error(`Batch of ${emails.length} is larger than ${MAX_BATCH} - refused`);\nif (!testMode && !REAL_SENDING_ENABLED) throw new Error('Real sending is not enabled in W2 yet (test mode only)');\n\n// The resume: whatever name n8n gave the uploaded file, pass it on as `resume`.\nconst files = wh.binary || {};\nconst key = Object.keys(files)[0];\nif (!key) throw new Error('No resume file received');\nconst resume = files[key];\nif (resume.mimeType && resume.mimeType !== 'application/pdf') throw new Error(`Resume must be a PDF, got ${resume.mimeType}`);\n\n// Spacing between sends, with a floor so a bad payload can't send in a burst.\nconst min = Math.max(Number(payload.spacing_min_s) || 180, testMode ? 30 : 120);\nconst max = Math.max(Number(payload.spacing_max_s) || 420, min);\n\nreturn emails.map(e => {\n  const to = String(e.to || '').trim().toLowerCase();\n  if (testMode && to !== TEST_TO.toLowerCase()) throw new Error(`Test mode may only send to the test address, got ${to}`);\n  if (!to || !e.subject || !e.body_text || !e.body_html) throw new Error(`Email ${e.email_id} is missing to, subject, body_text or body_html`);\n  if (e.reply_to_message_id) throw new Error('Follow-ups are not supported yet (Step 9)');\n  return {\n    json: {\n      email_id: e.email_id, to, subject: e.subject, body_text: e.body_text, body_html: e.body_html,\n      test_mode: testMode, batch_id: payload.batch_id, sender_name: payload.sender_name || '',\n      spacing_min_s: min, spacing_max_s: max,\n    },\n    binary: { resume },\n  };\n});"
       },
       "id": "6d1c3a52-1f0e-4c8e-9a51-0b7e2f1c0a02",
       "name": "Explode + guard",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [220, 300]
+      "position": [
+        220,
+        300
+      ]
     },
     {
       "parameters": {
@@ -36,7 +42,10 @@
       "name": "Respond to Webhook",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [440, 300]
+      "position": [
+        440,
+        300
+      ]
     },
     {
       "parameters": {
@@ -46,7 +55,10 @@
       "name": "Loop Over Items",
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
-      "position": [660, 300]
+      "position": [
+        660,
+        300
+      ]
     },
     {
       "parameters": {
@@ -54,8 +66,8 @@
         "operation": "send",
         "sendTo": "={{ $json.to }}",
         "subject": "={{ $json.subject }}",
-        "emailType": "text",
-        "message": "={{ $json.body_text }}",
+        "emailType": "html",
+        "message": "={{ $json.body_html }}",
         "options": {
           "appendAttribution": false,
           "attachmentsUi": {
@@ -72,7 +84,10 @@
       "name": "Gmail Send",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
-      "position": [900, 320],
+      "position": [
+        900,
+        320
+      ],
       "onError": "continueErrorOutput"
     },
     {
@@ -86,7 +101,10 @@
       "name": "Add MailMate label",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
-      "position": [1140, 240],
+      "position": [
+        1140,
+        240
+      ],
       "onError": "continueRegularOutput"
     },
     {
@@ -98,34 +116,98 @@
       "name": "Wait random gap",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
-      "position": [1380, 320],
+      "position": [
+        1380,
+        320
+      ],
       "webhookId": "6d1c3a52-1f0e-4c8e-9a51-0b7e2f1c0a98"
     }
   ],
   "connections": {
     "Webhook": {
-      "main": [[{ "node": "Explode + guard", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Explode + guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Explode + guard": {
-      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Respond to Webhook": {
-      "main": [[{ "node": "Loop Over Items", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Loop Over Items": {
-      "main": [[], [{ "node": "Gmail Send", "type": "main", "index": 0 }]]
+      "main": [
+        [],
+        [
+          {
+            "node": "Gmail Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Gmail Send": {
       "main": [
-        [{ "node": "Add MailMate label", "type": "main", "index": 0 }],
-        [{ "node": "Wait random gap", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Add MailMate label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait random gap",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Add MailMate label": {
-      "main": [[{ "node": "Wait random gap", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Wait random gap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Wait random gap": {
-      "main": [[{ "node": "Loop Over Items", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
