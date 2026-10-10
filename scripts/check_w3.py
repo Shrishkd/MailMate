@@ -36,6 +36,8 @@ def main(argv: list[str]) -> int:
     print(f"W3 returned {len(result.threads)} thread(s) in {time.monotonic() - started:.0f} s\n")
     for t in sorted(result.threads, key=lambda t: t.sent_at):
         print(f"{t.sent_at[:16]}  to {t.to}  '{t.subject}'  (thread {t.thread_id})")
+        for sent in t.later_sent:
+            print(f"    <- my later message (follow-up) at {sent.date[:16]}")
         for r in t.replies:
             sure = f"{r.confidence:.0%}" if r.confidence is not None else "-"
             print(f"    -> {r.category:<17} {sure:>4}  from {r.from_}: {r.snippet[:90]}")
