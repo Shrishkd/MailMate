@@ -7,3 +7,7 @@ maxUploadSize = 5   # MB; job lists are small
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# No "Deploy" button: MailMate stays on this machine (rule 7). Community Cloud apps are public.
+toolbarMode = "minimal"

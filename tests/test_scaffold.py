@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def test_streamlit_serves_localhost_only():
     config = tomllib.loads((ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
     assert config["server"]["address"] == "localhost"
+    assert config["client"]["toolbarMode"] == "minimal"     # no Deploy button
 
 
 def test_secrets_and_personal_data_are_git_ignored():
