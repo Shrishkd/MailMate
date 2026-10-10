@@ -27,6 +27,7 @@ Check the live n8n W1 workflow (calls real n8n and Ollama; not part of `pytest`)
 python scripts/check_w1.py          # W1 answers and refuses requests without the secret header
 python scripts/check_sentences.py   # W1 + MailMate's checks on the personal line, with retries
 python scripts/check_w2_guard.py you@primary.example   # W2 refuses what it must (mails only you)
+python scripts/check_w3.py         # what W3 reads and sorts, without changing MailMate's data
 ```
 
 ## Layout

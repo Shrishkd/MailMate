@@ -18,6 +18,7 @@ from mailmate.n8n import N8nClient, N8nError
 from mailmate.review import ReviewError
 from mailmate.sending import SendError
 from mailmate.sentence_check import PersonalLine, is_job_ad, personalize_checked
+from mailmate.sync import apply_sync
 from mailmate.templates import FIELDS, Template, check_template, latest_templates, merge, save_template, values_for
 
 st.set_page_config(page_title="MailMate", page_icon="✉️", layout="wide")
@@ -647,6 +648,72 @@ def _real_sending(test_to: str, settings: dict[str, str]) -> None:
                 st.rerun()
 
 
+CATEGORY_LABELS = {"interview_request": "🟢 interview request", "question": "🟡 question",
+                   "not_interested": "🔴 not interested", "bounce": "⚫ bounce", "auto_reply": "⚪ auto-reply",
+                   "other": "🔵 other"}
+
+
+def _notes_table(notes) -> pd.DataFrame:
+    return pd.DataFrame([{"Company": n.company, "To": n.to, "From": n.from_addr, "When": n.date[:16].replace("T", " "),
+                          "Category": CATEGORY_LABELS.get(n.category, n.category),
+                          "Sure": f"{n.confidence:.0%}" if n.confidence is not None else "",
+                          "Check": "⚠ look at it" if n.flagged else "", "Snippet": n.snippet} for n in notes])
+
+
+def page_replies():
+    st.title("Replies")
+    st.caption("Sync reads your MailMate-labelled Gmail threads through W3: emails Gmail shows as sent become "
+               "'sent', replies are sorted, and bounces and 'not interested' replies go on the do-not-contact list.")
+    try:
+        test_to = test_address()
+    except ConfigError as exc:
+        st.error(str(exc))
+        return
+    days = st.select_slider("Look back", options=[7, 14, 30, 60], value=30, format_func=lambda d: f"{d} days")
+    if st.button("Sync replies now", type="primary"):
+        try:
+            client = N8nClient(n8n_settings())
+            with st.spinner("W3 is reading Gmail and sorting replies (about 10-60 s)..."):
+                result = client.sync(days)
+            client.close()
+            st.session_state.sync_report = apply_sync(conn, result, test_to,
+                                                      spacing_max_s=sending.send_rules(conn).spacing_max_s)
+        except (ConfigError, N8nError) as exc:
+            st.error(f"Sync failed: {exc}")
+
+    if report := st.session_state.get("sync_report"):
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Threads read", report.threads)
+        c2.metric("Newly sent", len(report.newly_sent))
+        c3.metric("New replies", len(report.new_replies))
+        c4.metric("Added to do-not-contact", len(report.suppressed))
+        if report.new_replies:
+            st.subheader("New replies")
+            st.dataframe(_notes_table(report.new_replies), hide_index=True, width="stretch")
+        if report.suppressed:
+            st.info("Now on the do-not-contact list: " + ", ".join(report.suppressed))
+        if report.not_found:
+            st.warning("Queued long ago but not found in Gmail, so maybe never sent (check n8n → Executions for a "
+                       "failed Gmail Send): " + ", ".join(report.not_found))
+        if report.test_replies:
+            with st.expander(f"Replies to test sends ({len(report.test_replies)}): sorted, but they change nothing"):
+                st.dataframe(_notes_table(report.test_replies), hide_index=True, width="stretch")
+        if report.unknown_threads:
+            with st.expander(f"Labelled threads MailMate didn't send ({len(report.unknown_threads)})"):
+                st.write("\n".join(f"- {t}" for t in report.unknown_threads))
+
+    st.subheader("All replies")
+    replies = pd.read_sql_query(
+        "SELECT c.company, c.email AS recruiter, r.from_addr, r.date, r.category, r.confidence, r.snippet"
+        " FROM replies r JOIN emails e ON e.id = r.email_id JOIN contacts c ON c.id = e.contact_id"
+        " ORDER BY r.date DESC", conn)
+    if replies.empty:
+        st.caption("No replies yet.")
+    else:
+        replies["category"] = replies["category"].map(lambda c: CATEGORY_LABELS.get(c, c))
+        st.dataframe(replies, hide_index=True, width="stretch")
+
+
 contact_count = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
 draft_count = conn.execute("SELECT COUNT(*) FROM emails WHERE status = 'draft'").fetchone()[0]
 nav = st.navigation([
@@ -655,6 +722,7 @@ nav = st.navigation([
     st.Page(page_templates, title="Templates", icon="📝"),
     st.Page(page_review, title=f"Review ({draft_count})", icon="✅"),
     st.Page(page_send, title="Send", icon="📨"),
+    st.Page(page_replies, title="Replies", icon="💬"),
 ])
 nav.run()
 conn.close()

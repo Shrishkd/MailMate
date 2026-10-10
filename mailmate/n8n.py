@@ -6,12 +6,14 @@ won't change on retry (wrong token, workflow not published, workflow crashed) fa
 a message that says what to fix. Error messages never contain the token.
 """
 
+import html
 import json
+import re
 import time
 from typing import Callable
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from mailmate.config import N8nSettings
 
@@ -130,6 +132,18 @@ class N8nClient:
                            maybe_sent=True)
         return accepted
 
+    def sync(self, since_days: int = 30) -> "SyncResult":
+        """W3: my MailMate-labelled Gmail threads from the last `since_days` days, replies sorted.
+        Read-only on both ends, so it is safe to retry."""
+        data = self._post("MailMate-sync", json_body={"since_days": since_days})
+        if isinstance(data, list) and len(data) == 1:
+            data = data[0]
+        try:
+            return SyncResult.model_validate(data)
+        except ValidationError as exc:
+            where = ".".join(str(x) for x in exc.errors()[0]["loc"])
+            raise N8nError(f"W3 answered in an unexpected shape ({where}: {exc.errors()[0]['msg']})") from None
+
     def personalize(self, company: str, role: str, requirements: str = "", job_url: str = "",
                     feedback: str = "") -> Personalization:
         """`feedback`: why the previous sentence was rejected, so the retry can fix it."""
@@ -149,3 +163,37 @@ class N8nClient:
         if len(known) != len(result.sources):
             raise N8nError("W1 returned two sources with the same id")
         return result
+
+
+# Gmail's reply text starts with the reply and then quotes my email ("On Sat, Oct 10, 2026 ... wrote:").
+_QUOTE_START = re.compile(r"\s*(?:On (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b.*|-+ ?Original Message ?-+.*|>.*)$", re.S)
+
+
+class SyncReply(BaseModel):
+    message_id: str = ""
+    from_: str = Field("", alias="from")
+    date: str
+    snippet: str = ""
+    body_text: str = ""
+    category: str
+    confidence: float | None = None
+
+    @field_validator("snippet", "body_text")
+    @classmethod
+    def _readable(cls, text: str) -> str:
+        """Gmail snippets are HTML-escaped ('What&#39;s'); the quoted original email isn't the reply."""
+        return _QUOTE_START.sub("", html.unescape(text)).strip()
+
+
+class SyncThread(BaseModel):
+    thread_id: str
+    sent_message_id: str
+    to: str
+    subject: str = ""
+    sent_at: str
+    replies: list[SyncReply] = []
+
+
+class SyncResult(BaseModel):
+    threads: list[SyncThread] = []
+
