@@ -48,6 +48,99 @@ n8n (Cloud; later Docker)                       stateless: keeps no data
 - **Gmail is the record of what was sent:** every sent email gets the `MailMate` label; W3 reads
   labelled threads to learn which emails went out and who answered.
 
+## Workflow architecture
+
+### One email, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Me
+    participant App as MailMate (localhost)
+    participant W1 as n8n W1 Personalize
+    participant W2 as n8n W2 Send
+    participant Gmail
+    participant W3 as n8n W3 Sync
+    Me->>App: upload job list, choose template
+    App->>W1: company, role (+ feedback on the retry)
+    W1-->>App: personal line + cited sources
+    App->>App: checks on the line (one retry, else no line), merge template
+    Me->>App: review and approve, test email to my own inbox, typed confirmation
+    App->>W2: batch (emails + resume PDF)
+    W2-->>App: accepted (emails now 'queued')
+    loop every email, 3-7 min apart
+        W2->>Gmail: send with PDF, label MailMate
+    end
+    Gmail-->>Gmail: recruiter replies or the email bounces
+    Me->>App: Sync replies
+    App->>W3: since_days
+    W3->>Gmail: read MailMate-labelled threads
+    W3-->>App: threads, replies sorted, bounces flagged
+    App->>App: sent / replied / bounced, do-not-contact list
+    Note over App,W2: after 6 days without a reply: one follow-up draft, approved like any email,<br/>sent by W2 as a reply in the same Gmail thread
+```
+
+### W1 Personalize (`POST /webhook/MailMate-personalize`)
+
+```mermaid
+flowchart LR
+    A["Webhook<br/>secret header"] --> B["Web search<br/>Ollama web_search:<br/>company + latest + role area"]
+    B --> C["Build prompt<br/>up to 5 sources, rules,<br/>retry feedback"]
+    C --> D["LLM<br/>gpt-oss:120b<br/>retries on fail"]
+    D --> E["Shape result<br/>sentence + cited sources"]
+    E --> F["Respond to Webhook"]
+```
+
+Answer: `{sentence, sources: [{id, title, url, content}], model, search_ok}`. The source text comes back
+so MailMate's checks can verify every name and number in the line against it.
+
+### W2 Send (`POST /webhook/MailMate-send`, multipart: `payload` + `resume`)
+
+```mermaid
+flowchart LR
+    A["Webhook<br/>secret header"] --> B{"Explode + guard"}
+    B -- "refused: error,<br/>nothing sent" --> X(["MailMate shows the error"])
+    B -- "one item per email<br/>+ resume" --> C["Respond to Webhook<br/>accepted, batch_id"]
+    C --> D["Loop Over Items<br/>one at a time"]
+    D --> E{"Is follow-up?"}
+    E -- "no: first email" --> F["Gmail Send<br/>HTML + PDF,<br/>no n8n footer"]
+    E -- "yes" --> G["Get original<br/>Gmail API: Message-ID,<br/>To, From"]
+    G --> H["Build reply<br/>same recipient?<br/>Re: subject, In-Reply-To"]
+    H --> I["Send reply<br/>Gmail API, same thread"]
+    F --> J["Add MailMate label"]
+    I --> J
+    J --> K["Wait random gap<br/>3-7 min (tests 1-2)"]
+    F -. error .-> K
+    G -. error .-> K
+    H -. error .-> K
+    I -. error .-> K
+    K --> D
+```
+
+The guard refuses the whole batch before anything is sent if: a test email isn't addressed to
+`TEST_TO`, real sending is switched off, there are more than 20 emails, an email has no HTML body,
+or there is no PDF. It also puts a floor under the spacing. A failure on one email (red error
+paths) skips to the wait, so the rest of the batch still goes; W3 later shows which ones arrived.
+
+### W3 Sync (`POST /webhook/MailMate-sync`)
+
+```mermaid
+flowchart LR
+    A["Webhook<br/>secret header"] --> B["Labelled threads<br/>label:MailMate newer_than:Nd<br/>read + unread, max 100"]
+    B --> C["Get thread<br/>simplified: no attachments"]
+    C --> D["Find replies<br/>SENT = mine, the rest = replies,<br/>bounces by plain rules"]
+    D --> E{"Needs sorting?"}
+    E -- "replies to sort" --> F["Classify<br/>one LLM call per reply"]
+    E -- "nothing to sort" --> G["Aggregate<br/>answers back onto replies"]
+    F --> G
+    G --> H["Respond to Webhook<br/>threads"]
+```
+
+Answer: `{threads: [{thread_id, sent_message_id, to, subject, sent_at, later_sent, replies: [{from,
+date, snippet, category, confidence}]}]}`. The model can only choose `interview_request`,
+`not_interested`, `auto_reply`, `question` or `other`; `bounce` comes from the rules alone. MailMate
+decides what changes: matching threads to queued emails, statuses, the do-not-contact list.
+
 ## Setup from scratch (Windows, PowerShell)
 
 ### 1. The app
