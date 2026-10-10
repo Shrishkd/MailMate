@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from mailmate import db, review, sending
+from mailmate import db, followups, review, sending
 from mailmate.config import DB_PATH, RESUME_PATH, ConfigError, n8n_settings, test_address
 from mailmate.emailcheck import DnsDomainChecker
 from mailmate.importer import FIELD_LABELS, SUPPORTED, ImportReport, analyse, job_sheets
@@ -19,7 +19,8 @@ from mailmate.review import ReviewError
 from mailmate.sending import SendError
 from mailmate.sentence_check import PersonalLine, is_job_ad, personalize_checked
 from mailmate.sync import apply_sync
-from mailmate.templates import FIELDS, Template, check_template, latest_templates, merge, save_template, values_for
+from mailmate.templates import (FIELDS, FOLLOW_UP_TEMPLATE, Template, check_template, latest_templates, merge,
+                                save_template, values_for)
 
 st.set_page_config(page_title="MailMate", page_icon="✉️", layout="wide")
 conn = db.connect(DB_PATH)
@@ -330,37 +331,85 @@ def _review_actions(email_id: int, row, check: review.DraftCheck) -> None:
 
 def _review_edit(email_id: int, row, settings: dict[str, str]) -> None:
     with st.expander("Edit"):
-        with st.form(f"line_{email_id}"):
-            sentence = st.text_input("Personal line", row["sentence"],
-                                     help="Saving rebuilds the email from the template (hand edits are replaced) "
-                                          "and runs the checks again. Leave empty for no personal line.")
-            if st.form_submit_button("Save personal line"):
-                review.set_personal_line(conn, email_id, sentence)
-                st.rerun()
-        if st.button("Ask W1 for a new personal line", key=f"w1_{email_id}"):
-            contact = conn.execute("SELECT * FROM contacts WHERE id = ?", (row["contact_id"],)).fetchone()
-            client = None
-            try:
-                client = N8nClient(n8n_settings())
-                with st.spinner(f"W1 is researching {row['company']}..."):
-                    line = personalize_checked(client.personalize, contact, my_name=settings.get("my_name", ""))
-            except (ConfigError, N8nError) as exc:
-                st.error(f"W1 failed: {exc}")
-            else:
-                if line.sentence:
-                    review.set_personal_line(conn, email_id, line.sentence, line.sources)
-                    st.rerun()
-                st.warning("No new line passed the checks; the email is unchanged. Reasons: "
-                           + " | ".join(p for a in line.attempts for p in a.problems))
-            finally:
-                if client:
-                    client.close()
+        if row["kind"] == "follow_up":
+            st.caption("A follow-up has no personal line; edit its text below, or the Follow-up template.")
+        else:
+            _personal_line_editor(email_id, row, settings)
         with st.form(f"text_{email_id}"):
             subject = st.text_input("Subject", row["subject"])
             body = st.text_area("Body", row["body_text"], height=420)
             if st.form_submit_button("Save text"):
                 review.edit_text(conn, email_id, subject, body)
                 st.rerun()
+
+
+def _personal_line_editor(email_id: int, row, settings: dict[str, str]) -> None:
+    with st.form(f"line_{email_id}"):
+        sentence = st.text_input("Personal line", row["sentence"],
+                                 help="Saving rebuilds the email from the template (hand edits are replaced) "
+                                      "and runs the checks again. Leave empty for no personal line.")
+        if st.form_submit_button("Save personal line"):
+            review.set_personal_line(conn, email_id, sentence)
+            st.rerun()
+    if st.button("Ask W1 for a new personal line", key=f"w1_{email_id}"):
+        contact = conn.execute("SELECT * FROM contacts WHERE id = ?", (row["contact_id"],)).fetchone()
+        client = None
+        try:
+            client = N8nClient(n8n_settings())
+            with st.spinner(f"W1 is researching {row['company']}..."):
+                line = personalize_checked(client.personalize, contact, my_name=settings.get("my_name", ""))
+        except (ConfigError, N8nError) as exc:
+            st.error(f"W1 failed: {exc}")
+        else:
+            if line.sentence:
+                review.set_personal_line(conn, email_id, line.sentence, line.sources)
+                st.rerun()
+            st.warning("No new line passed the checks; the email is unchanged. Reasons: "
+                       + " | ".join(p for a in line.attempts for p in a.problems))
+        finally:
+            if client:
+                client.close()
+
+
+def _follow_ups_due() -> None:
+    now = datetime.now(timezone.utc)
+    due = followups.due(conn, now)
+    days = followups.follow_up_days(conn)
+    with st.expander(f"Follow-ups due ({len(due)}): first emails with no reply after {days} days"):
+        if result := st.session_state.pop("follow_up_result", None):
+            st.success(f"Drafted {result[0]} follow-up(s). They're in the queue below, ready for review.")
+            for problem in result[1]:
+                st.warning(problem)
+        new_days = st.number_input("Follow up after (days)", 2, 30, days)
+        if new_days != days:
+            followups.set_follow_up_days(conn, int(new_days))
+            st.rerun()
+        template = followups.follow_up_template(conn)
+        st.caption(f"Text: the **{template.name}** template (v{template.version}), editable on the Templates page. "
+                   "Each contact gets at most one follow-up, as a reply in the first email's Gmail thread.")
+        if not due:
+            return
+        synced = followups.last_sync(conn)
+        if not followups.sync_is_fresh(conn, now):
+            st.warning("Sync replies first (Replies page): "
+                       + (f"the last sync was at {synced.astimezone(sending.IST):%d %b %H:%M} IST" if synced else
+                          "there has been no sync yet") + ". Nobody who already answered should get a nudge.")
+            return
+        options = {r["id"]: r for r in due}
+        chosen = st.multiselect(
+            "First emails to follow up", list(options), default=list(options),
+            format_func=lambda i: f"{options[i]['company']} · {options[i]['name'] or '-'} · {options[i]['address']} "
+                                  f"(sent {options[i]['sent_at'][:10]})")
+        if st.button(f"Draft {len(chosen)} follow-up(s)", disabled=not chosen):
+            made, problems = 0, []
+            for first_id in chosen:
+                try:
+                    followups.create_follow_up(conn, first_id, now)
+                    made += 1
+                except ReviewError as exc:
+                    problems.append(str(exc))
+            st.session_state.follow_up_result = (made, problems)
+            st.rerun()
 
 
 def page_review():
@@ -387,7 +436,7 @@ def page_review():
             for problem in problems:
                 st.warning(problem)
         if candidates:
-            by_name = {f"{t.name} (v{t.version})": t for t in templates}
+            by_name = {f"{t.name} (v{t.version})": t for t in templates if t.name != FOLLOW_UP_TEMPLATE}
             template = by_name[st.selectbox("Template", list(by_name))]
             options = {c["id"]: c for c in candidates}
             chosen = st.multiselect(
@@ -398,6 +447,8 @@ def page_review():
             if st.button(f"Draft {len(chosen)} email(s)", type="primary", disabled=not chosen):
                 _draft_emails([options[i] for i in chosen], template, settings["my_name"])
                 st.rerun()
+
+    _follow_ups_due()
 
     if not queue:
         st.info("No drafts yet.")
@@ -523,6 +574,22 @@ def page_send():
                     st.error(f"Not sent: {exc}")
                 finally:
                     client.close()
+
+    if RESUME_PATH.exists():
+        follow_up = followups.follow_up_template(conn)
+        st.markdown(f"**Follow-up template ({follow_up.name} v{follow_up.version})**: tested as a reply in your "
+                    "self-test thread, so you see the text and that it lands in the same conversation.")
+        if st.button(f"Send a test follow-up to {test_to}"):
+            try:
+                client = N8nClient(n8n_settings())
+                with st.spinner("Handing the test to W2... (one click is enough)"):
+                    batch = sending.send_follow_up_template_test(conn, client, test_to, RESUME_PATH.read_bytes(),
+                                                                 settings.get("resume_name", "resume.pdf"))
+                client.close()
+                st.success(f"W2 accepted test batch #{batch.batch_id}. It should appear inside the Sarvam AI "
+                           "conversation within a minute.")
+            except (ConfigError, SendError, N8nError) as exc:
+                st.error(f"Not sent: {exc}")
 
     st.subheader("3. Check what arrived")
     batches = sending.test_batches(conn)

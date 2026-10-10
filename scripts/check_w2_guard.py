@@ -19,8 +19,9 @@ FAKE_PDF = b"%PDF-1.4\n% MailMate guard check\n"
 
 
 def email(to: str, n: int = 1) -> dict:
+    text = "If you received this, W2's guard is broken. Deactivate W2."
     return {"email_id": f"guard-{n}", "to": to, "subject": "MailMate guard check (should never arrive)",
-            "body_text": "If you received this, W2's guard is broken. Deactivate W2."}
+            "body_text": text, "body_html": f"<p>{text}</p>"}
 
 
 def main(argv: list[str]) -> int:
@@ -40,10 +41,11 @@ def main(argv: list[str]) -> int:
 
     cases = [
         ("test mode, address other than the test inbox", {"test_mode": True, "emails": [email(own)]}),
-        ("real sending (switched off until Step 7)", {"test_mode": False, "emails": [email(own)]}),
+        ("real-mode email without an HTML body",
+         {"test_mode": False, "emails": [{k: v for k, v in email(own).items() if k != "body_html"}]}),
         ("batch larger than 20", {"test_mode": True, "emails": [email(test_to, i) for i in range(21)]}),
-        ("follow-up (not supported until Step 9)",
-         {"test_mode": True, "emails": [{**email(test_to), "reply_to_message_id": "abc"}]}),
+        ("test-mode follow-up to an address other than the test inbox",
+         {"test_mode": True, "emails": [{**email(own), "reply_to_message_id": "abc"}]}),
     ]
     client = N8nClient(settings, retry_delays=())
     failures = 0

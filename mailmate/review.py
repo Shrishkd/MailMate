@@ -22,13 +22,14 @@ from pydantic import BaseModel
 from mailmate import db
 from mailmate.n8n import Source
 from mailmate.sentence_check import PersonalLine, check_sentence
-from mailmate.templates import OPT_OUT_LINE, Template, latest_templates, merge, values_for
+from mailmate.templates import FOLLOW_UP_TEMPLATE, OPT_OUT_LINE, Template, latest_templates, merge, values_for
 
 INDIVIDUAL_BATCHES = 2      # real batches that must be approved one email at a time
 SAMPLES_BEFORE_BULK = 5     # drafts I must look at before "approve all" unlocks
 
 _PLACEHOLDER = re.compile(r"\{[^{}\n]*\}|\[[^\]\n]{0,60}\]")
-_DONE_STATUSES = ("contacted", "followed_up", "replied", "bounced")
+_DONE_STATUSES = ("contacted", "followed_up", "replied", "bounced")      # no first email any more
+_NO_FOLLOW_UP = ("followed_up", "replied", "bounced")                    # no follow-up any more
 
 
 class ReviewError(ValueError):
@@ -68,9 +69,12 @@ def _sources(row) -> list[Source]:
     return [Source(**s) for s in json.loads(row["sources"] or "[]")]
 
 
-def _merged(row, settings: dict[str, str], sentence: str):
-    template = Template(name=row["template_name"], subject=row["t_subject"], body=row["t_body"])
-    return merge(template, values_for(row, settings, sentence))
+def _merged(row, settings: dict[str, str], sentence: str, template: Template | None = None):
+    template = template or Template(name=row["template_name"], subject=row["t_subject"], body=row["t_body"])
+    merged = merge(template, values_for(row, settings, sentence))
+    if merged.ok and row["kind"] == "follow_up":    # it replies in the first email's thread: "Re: ..."
+        merged = merged.model_copy(update={"subject": row["subject"]})
+    return merged
 
 
 # --- drafting -----------------------------------------------------------------------------
@@ -96,6 +100,8 @@ def create_draft(conn: sqlite3.Connection, contact_id: int, template: Template, 
         raise ReviewError(f"{contact['email']} already has an email")
     if template.id is None:
         raise ReviewError("save the template before drafting from it")
+    if template.name == FOLLOW_UP_TEMPLATE:
+        raise ReviewError("the Follow-up template is for follow-ups only")
     settings = db.get_settings(conn)
     merged = merge(template, values_for(contact, settings, line.sentence))
     if not merged.ok:
@@ -126,8 +132,16 @@ def check_draft(conn: sqlite3.Connection, email_id: int) -> DraftCheck:
     # Rule 5, never overridable.
     if row["address"].lower() in db.suppressed(conn):
         problem(f"{row['address']} is on the do-not-contact list", blocking=True)
-    if row["contact_status"] in _DONE_STATUSES:
+    if row["kind"] == "initial" and row["contact_status"] in _DONE_STATUSES:
         problem(f"{row['address']} was already contacted ({row['contact_status'].replace('_', ' ')})", blocking=True)
+    if row["kind"] == "follow_up":
+        if row["contact_status"] in _NO_FOLLOW_UP:
+            problem(f"{row['address']} has {row['contact_status'].replace('_', ' ')} since", blocking=True)
+        first = conn.execute("SELECT status FROM emails WHERE contact_id = ? AND kind = 'initial' AND test_mode = 0"
+                             " AND status NOT IN ('draft', 'approved', 'rejected')", (row["contact_id"],)).fetchone()
+        if first is None or first["status"] != "sent":
+            problem("a follow-up needs a first email that was sent and got no reply"
+                    + (f" (it is {first['status']})" if first else ""), blocking=True)
     other = conn.execute("SELECT id, status FROM emails WHERE contact_id = ? AND id != ? AND kind = ?"
                          " AND status != 'rejected'", (row["contact_id"], email_id, row["kind"])).fetchone()
     if other:
@@ -142,7 +156,7 @@ def check_draft(conn: sqlite3.Connection, email_id: int) -> DraftCheck:
             problem(f"personal line: {p}")
         if sentence not in row["body_text"]:
             check.notes.append("the personal line is no longer in the email text (edited by hand)")
-    else:
+    elif row["kind"] == "initial":
         check.notes.append("no personal line: the email goes out without one")
 
     # The final text.
@@ -175,6 +189,8 @@ def set_personal_line(conn: sqlite3.Connection, email_id: int, sentence: str,
     rebuilt from the template, so hand edits to subject/body are replaced. Back to draft."""
     row = _email(conn, email_id)
     _editable(row)
+    if row["kind"] == "follow_up":
+        raise ReviewError("follow-ups have no personal line; edit the text instead")
     sentence = " ".join(sentence.split())
     merged = _merged(row, db.get_settings(conn), sentence)
     if not merged.ok:
@@ -202,7 +218,7 @@ def rebuild_with_template(conn: sqlite3.Connection, email_id: int, template: Tem
     text changed, so it needs approving again. Hand edits are replaced."""
     row = _email(conn, email_id)
     _editable(row)
-    merged = merge(template, values_for(row, db.get_settings(conn), row["sentence"]))
+    merged = _merged(row, db.get_settings(conn), row["sentence"], template)
     if not merged.ok:
         raise ReviewError("; ".join(merged.errors))
     with conn:

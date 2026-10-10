@@ -9,6 +9,7 @@ later syncs match by id. Then:
 - not_interested, less sure                  -> 'replied', flagged for me to look at
 - interview_request / question / other       -> 'replied'
 - auto_reply (out of office)                 -> stored, nothing changes
+- a later message of mine in the thread      -> the queued follow-up is 'sent', contact 'followed_up'
 
 Replies to test sends are sorted and shown but change nothing. My own test address never goes on
 the do-not-contact list automatically. Running sync twice changes nothing the second time.
@@ -59,7 +60,8 @@ def _match(conn: sqlite3.Connection, threads: list[SyncThread]) -> dict[str, sql
     """thread id -> the real email it belongs to."""
     rows = conn.execute(
         "SELECT e.*, c.email AS address, c.company FROM emails e JOIN contacts c ON c.id = e.contact_id"
-        " WHERE e.test_mode = 0 AND e.status IN ('queued', 'sent', 'replied', 'bounced')").fetchall()
+        " WHERE e.kind = 'initial' AND e.test_mode = 0 AND e.status IN ('queued', 'sent', 'replied', 'bounced')"
+        ).fetchall()
     by_thread = {r["gmail_thread_id"]: r for r in rows if r["gmail_thread_id"]}
     waiting = [r for r in rows if not r["gmail_thread_id"]]
     matched = {}
@@ -83,6 +85,23 @@ def _advance(conn: sqlite3.Connection, email_id: int, contact_id: int, status: s
     conn.execute("UPDATE contacts SET status = ? WHERE id = ? AND status NOT IN ('bounced')"
                  + (" AND status NOT IN ('replied')" if contact_status == "contacted" else ""),
                  (contact_status, contact_id))
+
+
+def _confirm_follow_up(conn: sqlite3.Connection, t: SyncThread, first: sqlite3.Row, report: "SyncReport") -> None:
+    """My later message in the first email's thread is the queued follow-up going out."""
+    follow_up = conn.execute("SELECT * FROM emails WHERE contact_id = ? AND kind = 'follow_up' AND test_mode = 0"
+                             " AND status = 'queued'", (first["contact_id"],)).fetchone()
+    if follow_up is None:
+        return
+    for sent in t.later_sent:
+        if _parse(sent.date) >= _parse(follow_up["queued_at"]) - timedelta(seconds=MATCH_SLACK_S):
+            conn.execute("UPDATE emails SET status = 'sent', gmail_thread_id = ?, gmail_message_id = ?, sent_at = ?"
+                         " WHERE id = ?", (t.thread_id, sent.message_id, sent.date, follow_up["id"]))
+            conn.execute("UPDATE contacts SET status = 'followed_up' WHERE id = ? AND status = 'contacted'",
+                         (first["contact_id"],))
+            db.log_event(conn, "follow_up_sent_confirmed", contact_id=first["contact_id"], email_id=follow_up["id"])
+            report.newly_sent.append(f"{first['address']} (follow-up)")
+            return
 
 
 def apply_sync(conn: sqlite3.Connection, result: SyncResult, test_to: str, now: datetime | None = None,
@@ -114,6 +133,8 @@ def apply_sync(conn: sqlite3.Connection, result: SyncResult, test_to: str, now: 
                     report.newly_sent.append(email["address"])
                 db.log_event(conn, "email_sent_confirmed", contact_id=email["contact_id"], email_id=email["id"],
                              thread_id=t.thread_id)
+
+            _confirm_follow_up(conn, t, email, report)
 
             for r in t.replies:
                 inserted = conn.execute(
@@ -155,6 +176,9 @@ def apply_sync(conn: sqlite3.Connection, result: SyncResult, test_to: str, now: 
                             + timedelta(seconds=(len(emails) - 1) * spacing_max_s + NOT_FOUND_AFTER_S))
                 if now > deadline:
                     report.not_found += queued
+
+    with conn:
+        db.log_event(conn, "sync_done", threads=report.threads, replies=len(report.new_replies))
 
     for address, reason, note in to_suppress:
         if address.lower() == test_to.lower():

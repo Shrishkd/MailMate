@@ -185,6 +185,12 @@ class SyncReply(BaseModel):
         return _QUOTE_START.sub("", html.unescape(text)).strip()
 
 
+class LaterSent(BaseModel):
+    """A message I sent later in the same thread: the follow-up."""
+    message_id: str
+    date: str
+
+
 class SyncThread(BaseModel):
     thread_id: str
     sent_message_id: str
@@ -192,6 +198,7 @@ class SyncThread(BaseModel):
     subject: str = ""
     sent_at: str
     replies: list[SyncReply] = []
+    later_sent: list[LaterSent] = []
 
 
 class SyncResult(BaseModel):

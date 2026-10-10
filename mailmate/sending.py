@@ -20,9 +20,9 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from mailmate import db, review
+from mailmate import db, followups, review
 from mailmate.n8n import N8nClient, N8nError
-from mailmate.templates import to_html
+from mailmate.templates import merge, to_html, values_for
 
 MAX_TEST_EMAILS = 3
 REPEAT_COOLDOWN_S = 300         # the same test again this soon is a double click, not a decision
@@ -86,6 +86,12 @@ def build_test_payload(conn: sqlite3.Connection, email_ids: list[int], test_to: 
     if len({r["template_id"] for r in rows}) != 1:
         raise SendError("a test batch checks one template version; pick emails from the same version")
     settings = db.get_settings(conn)
+    thread_to_reply = None
+    if any(r["kind"] == "follow_up" for r in rows):
+        thread_to_reply = self_test_message(conn, test_to)
+        if thread_to_reply is None:
+            raise SendError("a follow-up test replies in a thread to your test address: send one real self-test "
+                            "email first (step 4) and sync replies")
     return {
         "batch_id": batch_id,
         "test_mode": True,
@@ -93,26 +99,74 @@ def build_test_payload(conn: sqlite3.Connection, email_ids: list[int], test_to: 
         "spacing_min_s": TEST_SPACING_S[0],
         "spacing_max_s": TEST_SPACING_S[1],
         "emails": [{"email_id": f"test-{batch_id}-{r['id']}", "to": test_to, "subject": r["subject"],
-                    "body_text": r["body_text"], "body_html": to_html(r["body_text"])}
+                    "body_text": r["body_text"], "body_html": to_html(r["body_text"]),
+                    **({"reply_to_message_id": thread_to_reply} if r["kind"] == "follow_up" else {})}
                    for r in sorted(rows, key=lambda r: email_ids.index(r["id"]))],
     }
 
 
+def self_test_message(conn: sqlite3.Connection, test_to: str) -> str | None:
+    """Gmail id of my latest real, synced first email to my own test address."""
+    row = conn.execute("SELECT e.gmail_message_id FROM emails e JOIN contacts c ON c.id = e.contact_id"
+                       " WHERE e.kind = 'initial' AND e.test_mode = 0 AND e.gmail_message_id IS NOT NULL"
+                       " AND lower(c.email) = lower(?) ORDER BY e.sent_at DESC LIMIT 1", (test_to,)).fetchone()
+    return row[0] if row else None
+
+
+def first_email_message(conn: sqlite3.Connection, contact_id: int) -> str | None:
+    """Gmail id of the contact's first email, which a follow-up replies to (known after a sync)."""
+    row = conn.execute("SELECT gmail_message_id FROM emails WHERE contact_id = ? AND kind = 'initial'"
+                       " AND test_mode = 0 AND gmail_message_id IS NOT NULL", (contact_id,)).fetchone()
+    return row[0] if row else None
+
+
 def send_test(conn: sqlite3.Connection, client: N8nClient, email_ids: list[int], test_to: str,
               resume: bytes, resume_name: str) -> TestBatch:
-    """Create a test batch, hand it to W2. The batch row records the outcome either way."""
+    """Create a test batch of drafts/approved emails, hand it to W2. The batch row records the outcome."""
+    template_id = conn.execute("SELECT template_id FROM emails WHERE id = ?", (email_ids[0],)).fetchone()
+    if template_id is None:
+        raise SendError("that email doesn't exist")
+    return _submit_test(conn, client, template_id[0], email_ids, test_to, resume, resume_name,
+                        lambda batch_id: build_test_payload(conn, email_ids, test_to, batch_id))
+
+
+def send_follow_up_template_test(conn: sqlite3.Connection, client: N8nClient, test_to: str,
+                                 resume: bytes, resume_name: str) -> TestBatch:
+    """Test the Follow-up template before any follow-up is due: it is filled in for my self-test
+    contact and sent as a reply in my self-test thread, so both the text and the threading show."""
+    template = followups.follow_up_template(conn)
+    first = conn.execute("SELECT e.*, c.id AS cid FROM emails e JOIN contacts c ON c.id = e.contact_id"
+                         " WHERE e.kind = 'initial' AND e.test_mode = 0 AND e.gmail_message_id IS NOT NULL"
+                         " AND lower(c.email) = lower(?) ORDER BY e.sent_at DESC LIMIT 1", (test_to,)).fetchone()
+    if first is None:
+        raise SendError("send one real self-test email first (step 4) and sync replies: the follow-up test "
+                        "replies in that thread")
+    contact = conn.execute("SELECT * FROM contacts WHERE id = ?", (first["cid"],)).fetchone()
+    settings = db.get_settings(conn)
+    merged = merge(template, values_for(contact, settings, ""))
+    if not merged.ok:
+        raise SendError("; ".join(merged.errors))
+
+    def payload(batch_id: int) -> dict:
+        return {"batch_id": batch_id, "test_mode": True, "sender_name": settings.get("my_name", ""),
+                "spacing_min_s": TEST_SPACING_S[0], "spacing_max_s": TEST_SPACING_S[1],
+                "emails": [{"email_id": f"test-{batch_id}-follow-up", "to": test_to,
+                            "subject": followups.reply_subject(first["subject"]), "body_text": merged.body_text,
+                            "body_html": to_html(merged.body_text), "reply_to_message_id": first["gmail_message_id"]}]}
+
+    return _submit_test(conn, client, template.id, [-template.id], test_to, resume, resume_name, payload)
+
+
+def _submit_test(conn, client, template_id, email_ids, test_to, resume, resume_name, build) -> TestBatch:
     check_resume(resume)
     if (repeat := recent_identical_test(conn, email_ids)) is not None:
         raise SendError(f"this exact test went out {repeat} s ago (a double click?); check {test_to} first. "
                         f"The same test can be sent again after {REPEAT_COOLDOWN_S // 60} minutes")
-    template_id = conn.execute("SELECT template_id FROM emails WHERE id = ?", (email_ids[0],)).fetchone()
-    if template_id is None:
-        raise SendError("that email doesn't exist")
     with conn:
         batch_id = conn.execute("INSERT INTO batches (template_id, test_mode, status, created_at) VALUES (?, 1, 'draft', ?)",
-                                (template_id[0], db.now())).lastrowid
+                                (template_id, db.now())).lastrowid
     try:
-        payload = build_test_payload(conn, email_ids, test_to, batch_id)
+        payload = build(batch_id)
     except SendError:
         with conn:
             conn.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
@@ -128,7 +182,7 @@ def send_test(conn: sqlite3.Connection, client: N8nClient, email_ids: list[int],
         conn.execute("UPDATE batches SET status = 'submitted', submitted_at = ? WHERE id = ?", (db.now(), batch_id))
         db.log_event(conn, "test_batch_submitted", batch_id=batch_id, to=test_to, email_ids=email_ids,
                      emails=json.dumps([{"subject": e["subject"]} for e in payload["emails"]]))
-    return TestBatch(batch_id=batch_id, template_id=template_id[0], email_ids=email_ids, to=test_to)
+    return TestBatch(batch_id=batch_id, template_id=template_id, email_ids=email_ids, to=test_to)
 
 
 def recent_identical_test(conn: sqlite3.Connection, email_ids: list[int]) -> int | None:
@@ -249,6 +303,8 @@ def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetim
     for r in rows:
         if r["status"] != "approved":
             problems.append(f"#{r['id']} is {r['status']}, not approved")
+        if r["kind"] == "follow_up" and first_email_message(conn, r["contact_id"]) is None:
+            problems.append(f"#{r['id']}: the first email's Gmail thread isn't known yet; sync replies first")
         for p in review.check_draft(conn, r["id"]).blocking:
             problems.append(f"#{r['id']}: {p.text}")
     if len({r["template_id"] for r in rows}) != 1:
@@ -315,7 +371,9 @@ def send_real(conn: sqlite3.Connection, client: N8nClient, email_ids: list[int],
         "batch_id": batch_id, "test_mode": False, "sender_name": db.get_settings(conn).get("my_name", ""),
         "spacing_min_s": rules.spacing_min_s, "spacing_max_s": rules.spacing_max_s,
         "emails": [{"email_id": str(r["id"]), "to": r["address"], "subject": r["subject"],
-                    "body_text": r["body_text"], "body_html": to_html(r["body_text"])} for r in rows],
+                    "body_text": r["body_text"], "body_html": to_html(r["body_text"]),
+                    **({"reply_to_message_id": first_email_message(conn, r["contact_id"])}
+                       if r["kind"] == "follow_up" else {})} for r in rows],
     }
     try:
         client.send_batch(payload, resume, resume_name)

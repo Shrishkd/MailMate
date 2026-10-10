@@ -21,6 +21,10 @@ SUBJECT_FIELDS = ("first_name", "company", "role", "my_name")
 # Rule 6: every email carries this line, just above the signature.
 OPT_OUT_LINE = "If this isn't relevant, just let me know and I won't follow up."
 
+# The template for the one follow-up (Step 9). It replies in the first email's thread, so its
+# subject is never used: the follow-up's subject is "Re: <first subject>".
+FOLLOW_UP_TEMPLATE = "Follow-up"
+
 _FIELD = re.compile(r"\{([^{}\n]*)\}")
 # A field plus the space before it, so an empty value doesn't leave "Hey ," behind.
 _FIELD_WITH_SPACE = re.compile(r"(?P<space>[ \t]?)\{(?P<name>[a-z_]+)\}")
