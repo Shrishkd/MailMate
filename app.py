@@ -11,7 +11,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from mailmate import db, followups, review, sending, stats
+from mailmate import db, followups, review, selection, sending, stats
 from mailmate.config import DB_PATH, RESUME_PATH, ConfigError, n8n_settings, test_address
 from mailmate.emailcheck import DnsDomainChecker
 from mailmate.importer import FIELD_LABELS, SUPPORTED, ImportReport, analyse, job_sheets
@@ -134,7 +134,7 @@ def page_upload():
 def page_contacts():
     st.title("Contacts")
     contacts = pd.read_sql_query(
-        "SELECT company, role, email, name, title, status, source_file, created_at FROM contacts ORDER BY id DESC", conn)
+        "SELECT company, role, email, name, title, priority, status, source_file, created_at FROM contacts ORDER BY id DESC", conn)
     if contacts.empty:
         st.info("No contacts yet. Upload a job list first.")
     else:
@@ -413,6 +413,22 @@ def _follow_ups_due() -> None:
             st.rerun()
 
 
+DRAFT_SUGGESTION = 10     # W1 takes 5-30 s per contact, so suggest a batch that drafts in a few minutes
+
+
+def _who(row) -> str:
+    tag = {"high": "[High] ", "medium": "[Medium] ", "low": "[Low] "}.get(row["priority"] or "", "")
+    return f"{tag}{row['company']} · {row['name'] or '-'} · {row['email']}"
+
+
+def _company_blocks_note(now: datetime, test_to: str) -> None:
+    blocks = selection.company_blocks(conn, now, test_to)
+    if blocks:
+        with st.expander(f"Companies waiting or closed ({len(blocks)}): nobody else there is emailed for now"):
+            st.write("\n".join(f"- **{b.company}**: {b.describe()}" for b in
+                               sorted(blocks.values(), key=lambda b: b.company.lower())))
+
+
 def page_review():
     st.title("Review")
     st.caption("Every email needs your approval. Approving doesn't send anything: sending comes in Steps 6-7.")
@@ -423,6 +439,11 @@ def page_review():
     templates = latest_templates(conn)
     if not templates:
         st.warning("Save a template on the Templates page first.")
+        return
+    try:
+        test_to = test_address()
+    except ConfigError as exc:
+        st.error(str(exc))
         return
 
     queue = conn.execute(
@@ -440,11 +461,15 @@ def page_review():
             by_name = {f"{t.name} (v{t.version})": t for t in templates if t.name != FOLLOW_UP_TEMPLATE}
             template = by_name[st.selectbox("Template", list(by_name))]
             options = {c["id"]: c for c in candidates}
+            now = datetime.now(timezone.utc)
+            suggested = selection.suggest_drafts(conn, candidates, now, test_to, limit=DRAFT_SUGGESTION)
             chosen = st.multiselect(
-                "Contacts (at most 20 per run)", list(options), default=list(options)[:5], max_selections=20,
-                format_func=lambda i: f"{options[i]['company']} · {options[i]['name'] or '-'} · {options[i]['email']}")
-            st.caption("W1 researches each company (about 5-30 s each); the personal line is checked, retried once, "
-                       "or left out. Keep this tab open while it runs.")
+                "Contacts (at most 20 per run)", list(options), default=suggested, max_selections=20,
+                format_func=lambda i: _who(options[i]))
+            st.caption(f"Pre-ticked: {len(suggested)} suggested, one recruiter per company, High priority first, "
+                       "skipping companies that are waiting, closed, or already have a draft. Change it freely. "
+                       "W1 researches each company (about 5-30 s each). Keep this tab open while it runs.")
+            _company_blocks_note(now, test_to)
             if st.button(f"Draft {len(chosen)} email(s)", type="primary", disabled=not chosen):
                 _draft_emails([options[i] for i in chosen], template, settings["my_name"])
                 st.rerun()
@@ -661,9 +686,17 @@ def _real_sending(test_to: str, settings: dict[str, str]) -> None:
         st.info("No approved emails from a test-checked template version yet.")
     else:
         options = {r["id"]: r for r in candidates}
+        room, why = sending.capacity_now(conn, now)
+        suggested = selection.suggest_send(conn, candidates, now, test_to, limit=room)
         chosen = st.multiselect(
-            "Approved emails to send for real", list(options), max_selections=min(sending.MAX_BATCH, rules.daily_cap),
-            format_func=lambda i: f"#{i} {options[i]['company']} · {options[i]['name'] or '-'} · {options[i]['email']}")
+            "Approved emails to send for real", list(options), default=suggested,
+            max_selections=min(sending.MAX_BATCH, rules.daily_cap),
+            format_func=lambda i: f"#{i} " + ("follow-up · " if options[i]["kind"] == "follow_up" else "")
+                                  + _who(options[i]))
+        st.caption(f"Pre-ticked: {len(suggested)} suggested ({why}): follow-ups first, otherwise one recruiter per "
+                   "free company, High priority first. Change it freely; the rules are checked again below."
+                   if room else f"Nothing pre-ticked: {why}. A batch to your own test address can still go.")
+        _company_blocks_note(now, test_to)
         if chosen:
             plan = sending.plan_real_batch(conn, chosen, now, test_to)
             for problem in plan.problems:

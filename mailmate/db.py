@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
     name          TEXT NOT NULL DEFAULT '',
     title         TEXT NOT NULL DEFAULT '',     -- the recruiter's own job title (context only)
+    priority      TEXT NOT NULL DEFAULT '',     -- high | medium | low | '' (who goes first)
     job_url       TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL DEFAULT 'new'
                   CHECK (status IN ({_statuses(CONTACT_STATUSES)})),
@@ -164,6 +165,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     have = {r["name"] for r in conn.execute("PRAGMA table_info(contacts)")}
     if "title" not in have:
         conn.execute("ALTER TABLE contacts ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+    if "priority" not in have:
+        conn.execute("ALTER TABLE contacts ADD COLUMN priority TEXT NOT NULL DEFAULT ''")
     if "queued_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(emails)")}:
         conn.execute("ALTER TABLE emails ADD COLUMN queued_at TEXT")
 
@@ -223,10 +226,10 @@ def add_contacts(conn: sqlite3.Connection, contacts: list, source_file: str) -> 
                 continue
             try:
                 cur = conn.execute(
-                    "INSERT INTO contacts (company, role, requirements, email, name, title, job_url, source_file, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (c.company, c.role, c.requirements, email, c.name, getattr(c, "title", ""), c.job_url,
-                     source_file, now()),
+                    "INSERT INTO contacts (company, role, requirements, email, name, title, priority, job_url,"
+                    " source_file, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (c.company, c.role, c.requirements, email, c.name, getattr(c, "title", ""),
+                     getattr(c, "priority", ""), c.job_url, source_file, now()),
                 )
             except sqlite3.IntegrityError:  # already a contact
                 skipped.append(email)

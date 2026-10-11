@@ -20,7 +20,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from mailmate import db, followups, review
+from mailmate import db, followups, review, selection
 from mailmate.n8n import N8nClient, N8nError
 from mailmate.templates import merge, to_html, values_for
 
@@ -294,7 +294,7 @@ def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetim
         return plan
     marks = ",".join("?" * len(email_ids))
     rows = conn.execute(
-        f"SELECT e.*, c.email AS address, t.name AS template_name, t.version, t.test_checked_at FROM emails e"
+        f"SELECT e.*, c.email AS address, c.company, t.name AS template_name, t.version, t.test_checked_at FROM emails e"
         f" JOIN contacts c ON c.id = e.contact_id JOIN templates t ON t.id = e.template_id WHERE e.id IN ({marks})",
         email_ids).fetchall()
     if len(rows) != len(set(email_ids)):
@@ -312,6 +312,18 @@ def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetim
     for r in {r["template_id"]: r for r in rows}.values():
         if not r["test_checked_at"]:
             problems.append(f"{r['template_name']} v{r['version']} has no checked test email yet (rule 2)")
+
+    # One recruiter per company at a time (selection.py); follow-ups go to the same person, so they're exempt.
+    blocks, seen = selection.company_blocks(conn, now, test_to), {}
+    for r in rows:
+        if r["kind"] != "initial" or r["address"].lower() == test_to.lower():
+            continue
+        key = selection.company_key(r["company"])
+        if key in seen:
+            problems.append(f"#{seen[key]} and #{r['id']} are both at {r['company']}: one recruiter per company at a time")
+        seen.setdefault(key, r["id"])
+        if key in blocks:
+            problems.append(f"#{r['id']}: {r['company']} is {blocks[key].describe()}")
 
     plan.self_test = all(r["address"].lower() == test_to.lower() for r in rows)
     local = now.astimezone(IST)
@@ -337,6 +349,26 @@ def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetim
         problems.append(f"batch #{running[0]} may still be sending until about "
                         f"{running[1].astimezone(IST):%H:%M}; one batch at a time")
     return plan
+
+
+def capacity_now(conn: sqlite3.Connection, now: datetime) -> tuple[int, str]:
+    """(how many real emails may go in a batch right now, why not more). Self-tests aside."""
+    rules = send_rules(conn)
+    local = now.astimezone(IST)
+    if local.weekday() >= 5:
+        return 0, "weekend: real emails go out Monday to Friday"
+    if not rules.window_start <= local.time() < rules.window_end:
+        return 0, f"outside the sending window ({rules.window_start:%H:%M}-{rules.window_end:%H:%M} IST)"
+    if running := running_batch(conn, now, rules):
+        return 0, f"batch #{running[0]} may still be sending until about {running[1].astimezone(IST):%H:%M}"
+    left_today = rules.daily_cap - queued_today(conn, now)
+    end = datetime.combine(local.date(), rules.window_end, IST)
+    fits = 1 + int((end - now).total_seconds() // rules.spacing_max_s)
+    limit = max(0, min(MAX_BATCH, left_today, fits))
+    why = ("daily cap reached" if left_today <= 0 else
+           f"{left_today} left under today's cap" if limit == left_today else
+           f"{fits} fit before {rules.window_end:%H:%M}" if limit == fits else f"at most {MAX_BATCH} per batch")
+    return limit, why
 
 
 class RealBatch(BaseModel):
@@ -426,6 +458,7 @@ def real_batches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def sendable_emails(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Approved emails whose template version has a checked test."""
     return conn.execute(
-        "SELECT e.id, e.template_id, c.company, c.name, c.email, t.name AS template_name, t.version FROM emails e"
+        "SELECT e.id, e.kind, e.template_id, e.contact_id, c.company, c.name, c.email, c.priority,"
+        " t.name AS template_name, t.version FROM emails e"
         " JOIN contacts c ON c.id = e.contact_id JOIN templates t ON t.id = e.template_id"
         " WHERE e.status = 'approved' AND t.test_checked_at IS NOT NULL ORDER BY e.id").fetchall()

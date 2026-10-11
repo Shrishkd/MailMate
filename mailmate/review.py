@@ -85,7 +85,8 @@ def contacts_to_draft(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         "SELECT * FROM contacts c WHERE c.status = 'new'"
         " AND c.email NOT IN (SELECT email FROM suppression)"
         " AND NOT EXISTS (SELECT 1 FROM emails e WHERE e.contact_id = c.id AND e.status != 'rejected')"
-        " ORDER BY c.id").fetchall()
+        " ORDER BY CASE c.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, c.id"
+        ).fetchall()
 
 
 def create_draft(conn: sqlite3.Connection, contact_id: int, template: Template, line: PersonalLine) -> int:

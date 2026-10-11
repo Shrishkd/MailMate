@@ -47,12 +47,14 @@ ALIASES = {
                      "email verification", "verified"),
     "status": ("status", "outreach status", "contact status"),
     "date_sent": ("date sent", "sent on", "sent date", "emailed on", "date emailed"),
+    "priority": ("priority", "importance"),
 }
 REQUIRED = ("company", "email")
 FIELD_LABELS = {"company": "Company", "role": "Role applying for", "title": "Their title",
                 "requirements": "Requirements", "email": "Recruiter email", "name": "Recruiter name",
                 "first_name": "First name", "last_name": "Last name", "job_url": "Job URL",
-                "email_status": "Email status", "status": "Status", "date_sent": "Date sent"}
+                "email_status": "Email status", "status": "Status", "date_sent": "Date sent",
+                "priority": "Priority"}
 
 # Spreadsheet stand-ins for "nothing here".
 EMPTY_MARKERS = {"", "-", "--", "—", "–", "n/a", "na", "nil", "none", "null", "nan", "tbd", "?"}
@@ -81,6 +83,7 @@ class Contact(BaseModel):
     name: str = ""
     title: str = ""           # the recruiter's own job title, for context only
     job_url: str = ""
+    priority: str = ""        # 'high' | 'medium' | 'low' | '' : who goes first in suggestions
 
 
 class RowResult(BaseModel):
@@ -162,6 +165,20 @@ class ImportReport(BaseModel):
             lines += [f"         error:   {e}" for e in r.errors]
             lines += [f"         warning: {w}" for w in r.warnings]
         return "\n".join(lines)
+
+
+def normalize_priority(value: str) -> str:
+    """'High', 'P1', '1 - urgent' -> 'high'; anything unrecognised -> '' (sorted after 'low')."""
+    text = _norm_header(value)
+    if not text:
+        return ""
+    if text.startswith(("high", "urgent", "top")) or text in ("p1", "1", "a"):
+        return "high"
+    if text.startswith(("med", "normal")) or text in ("p2", "2", "b"):
+        return "medium"
+    if text.startswith("low") or text in ("p3", "3", "c"):
+        return "low"
+    return ""
 
 
 def _norm_header(text: str) -> str:
@@ -334,7 +351,7 @@ def check_row(raw: dict[str, str], row: int, check_domain: DomainChecker, defaul
                 or address.display_name)
         result.contact = Contact(company=company, role=role, requirements=raw.get("requirements", "").strip(),
                                  email=address.email, job_url=job_url, name=name,
-                                 title=_one_line(raw.get("title", "")))
+                                 title=_one_line(raw.get("title", "")), priority=normalize_priority(raw.get("priority", "")))
     return result
 
 
