@@ -258,6 +258,19 @@ def approve(conn: sqlite3.Connection, email_id: int, override_reason: str = "") 
                      overridden=[p.text for p in check.problems], reason=override_reason.strip())
 
 
+def approval_covers(conn: sqlite3.Connection, email_id: int, check: DraftCheck) -> bool:
+    """Was every problem the email has now accepted with an override when it was approved? An email
+    approved before a check existed (or edited since) may not go out on that old approval."""
+    if not check.problems:
+        return True
+    row = conn.execute("SELECT detail FROM events WHERE kind = 'email_approved' AND email_id = ?"
+                       " ORDER BY id DESC LIMIT 1", (email_id,)).fetchone()
+    if row is None:
+        return False
+    detail = json.loads(row[0])
+    return bool(detail.get("reason")) and {p.text for p in check.problems} <= set(detail.get("overridden", []))
+
+
 def unapprove(conn: sqlite3.Connection, email_id: int) -> None:
     row = _email(conn, email_id)
     if row["status"] != "approved":
@@ -282,10 +295,14 @@ def reject(conn: sqlite3.Connection, email_id: int, never_contact: bool = False)
 
 # --- approve all --------------------------------------------------------------------------
 
-def bulk_approval_status(conn: sqlite3.Connection, reviewed: int) -> tuple[bool, str]:
-    """(allowed, why not). `reviewed`: drafts I've opened in the queue this session."""
-    real_batches = conn.execute("SELECT COUNT(*) FROM batches WHERE test_mode = 0 AND status IN ('submitted', 'done')"
-                                ).fetchone()[0]
+def bulk_approval_status(conn: sqlite3.Connection, reviewed: int, test_to: str = "") -> tuple[bool, str]:
+    """(allowed, why not). `reviewed`: drafts I've opened in the queue this session. Self-test
+    batches (only my own test address) don't count as real batches."""
+    real_batches = conn.execute(
+        "SELECT COUNT(*) FROM batches b WHERE b.test_mode = 0 AND b.status IN ('submitted', 'done')"
+        " AND NOT (EXISTS (SELECT 1 FROM emails e WHERE e.batch_id = b.id)"
+        "          AND NOT EXISTS (SELECT 1 FROM emails e JOIN contacts c ON c.id = e.contact_id"
+        "                          WHERE e.batch_id = b.id AND lower(c.email) != lower(?)))", (test_to,)).fetchone()[0]
     if real_batches < INDIVIDUAL_BATCHES:
         return False, (f"the first {INDIVIDUAL_BATCHES} real batches are approved one email at a time "
                        f"({real_batches} sent so far)")
@@ -294,9 +311,9 @@ def bulk_approval_status(conn: sqlite3.Connection, reviewed: int) -> tuple[bool,
     return True, ""
 
 
-def approve_all_clean(conn: sqlite3.Connection, reviewed: int) -> tuple[int, int]:
+def approve_all_clean(conn: sqlite3.Connection, reviewed: int, test_to: str = "") -> tuple[int, int]:
     """Approve every draft that has no problem at all. Returns (approved, left for one-by-one review)."""
-    allowed, why = bulk_approval_status(conn, reviewed)
+    allowed, why = bulk_approval_status(conn, reviewed, test_to)
     if not allowed:
         raise ReviewError(f"approve all isn't available yet: {why}")
     approved = left = 0

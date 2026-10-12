@@ -132,6 +132,8 @@ def test_an_auto_reply_doesnt_close_the_company(conn, world):
 
 def test_my_test_address_never_closes_a_company(conn, world):
     conn.execute("UPDATE contacts SET company = 'Oracle' WHERE email = ?", (TEST_TO,))
+    conn.execute("UPDATE emails SET subject = replace(subject, 'Self', 'Oracle'), body_text = replace(body_text, 'Self', 'Oracle')"
+                 " WHERE id = ?", (world[TEST_TO],))
     send(conn, [world[TEST_TO]])
     mark(conn, world[TEST_TO], "replied")
     reply(conn, world[TEST_TO], "interview_request")

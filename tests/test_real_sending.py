@@ -229,3 +229,31 @@ def test_a_queued_email_cant_be_queued_again(conn, setup):
     send(conn, ids)
     problems = sending.plan_real_batch(conn, ids, MONDAY_10 + timedelta(hours=1), TEST_TO).problems
     assert any("is queued, not approved" in p for p in problems)
+
+
+# --- an approval only covers the problems it accepted ---------------------------------------------
+
+def test_an_email_approved_before_a_check_failed_it_is_not_sent(conn, setup):
+    [email_id] = recruiters(setup, 1)
+    conn.execute("UPDATE emails SET subject = replace(subject, 'Company 0', 'your team'),"
+                 " body_text = replace(body_text, 'Company 0', 'your company') WHERE id = ?", (email_id,))
+    problems = sending.plan_real_batch(conn, [email_id], MONDAY_10, TEST_TO).problems
+    assert problems and "now fails a check its approval didn't accept (the email doesn't mention Company 0)" in problems[0]
+
+
+def test_a_visible_override_at_approval_covers_it(conn, setup):
+    [email_id] = recruiters(setup, 1)
+    review.unapprove(conn, email_id)
+    conn.execute("UPDATE emails SET subject = replace(subject, 'Company 0', 'your team'),"
+                 " body_text = replace(body_text, 'Company 0', 'your company') WHERE id = ?", (email_id,))
+    review.approve(conn, email_id, override_reason="generic on purpose")
+    assert sending.plan_real_batch(conn, [email_id], MONDAY_10, TEST_TO).ok
+
+
+def test_a_self_test_batch_doesnt_unlock_approve_all(conn, setup):
+    send(conn, [setup[1][TEST_TO]], now=SATURDAY_10)
+    conn.execute("UPDATE batches SET status = 'done'")
+    allowed, why = review.bulk_approval_status(conn, reviewed=10, test_to=TEST_TO)
+    assert not allowed and "(0 sent so far)" in why
+    send(conn, recruiters(setup, 1))
+    assert "(1 sent so far)" in review.bulk_approval_status(conn, reviewed=10, test_to=TEST_TO)[1]

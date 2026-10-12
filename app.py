@@ -495,11 +495,11 @@ def page_review():
             st.rerun()
 
     reviewed: set = st.session_state.setdefault("reviewed", set())
-    allowed, why = review.bulk_approval_status(conn, len(reviewed))
+    allowed, why = review.bulk_approval_status(conn, len(reviewed), test_to)
     if st.button("Approve all drafts with no problems", disabled=not allowed or not drafts,
                  help=None if allowed else f"Locked: {why}"):
         try:
-            approved, left = review.approve_all_clean(conn, len(reviewed))
+            approved, left = review.approve_all_clean(conn, len(reviewed), test_to)
             st.success(f"Approved {approved}; {left} with problems left for one-by-one review.")
         except ReviewError as exc:
             st.error(str(exc))

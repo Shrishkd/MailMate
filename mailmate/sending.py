@@ -305,8 +305,13 @@ def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetim
             problems.append(f"#{r['id']} is {r['status']}, not approved")
         if r["kind"] == "follow_up" and first_email_message(conn, r["contact_id"]) is None:
             problems.append(f"#{r['id']}: the first email's Gmail thread isn't known yet; sync replies first")
-        for p in review.check_draft(conn, r["id"]).blocking:
+        check = review.check_draft(conn, r["id"])
+        for p in check.blocking:
             problems.append(f"#{r['id']}: {p.text}")
+        if r["status"] == "approved" and not check.blocking and not review.approval_covers(conn, r["id"], check):
+            problems.append(f"#{r['id']} now fails a check its approval didn't accept ("
+                            + "; ".join(p.text for p in check.problems)
+                            + "): fix it on the Review page, or unapprove and approve it with an override")
     if len({r["template_id"] for r in rows}) != 1:
         problems.append("one template version per batch")
     for r in {r["template_id"]: r for r in rows}.values():
