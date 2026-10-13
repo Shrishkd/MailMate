@@ -44,6 +44,10 @@ def _is_duplicate(row) -> bool:
     return len(row.errors) == 1 and row.errors[0].startswith("duplicate of ")
 
 
+def _has_no_email(row) -> bool:
+    return row.errors == ["email is missing"]
+
+
 def page_upload():
     st.title("Upload a job list")
     st.caption("A .csv, .xlsx or Word table with at least **company** and **recruiter email** (optional: name, "
@@ -87,14 +91,22 @@ def page_upload():
         for note in sheet.notes:
             st.info(note)
     duplicates = [r for r in report.rejected if _is_duplicate(r)]
-    problems = [r for r in report.rejected if not _is_duplicate(r)]
+    no_email = [r for r in report.rejected if _has_no_email(r)]
+    problems = [r for r in report.rejected if not _is_duplicate(r) and not _has_no_email(r)]
     warned = [r for r in report.valid if r.warnings]
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Rows read", len(report.rows))
     c2.metric("Will be imported", len(report.valid))
     c3.metric("Rejected", len(problems))
-    c4.metric("Duplicates", len(duplicates))
-    c5.metric("Blank or note rows", report.blank_rows)
+    c4.metric("No email", len(no_email))
+    c5.metric("Duplicates", len(duplicates))
+    c6.metric("Blank or note rows", report.blank_rows)
+    if report.job_links:
+        linked = sum(1 for r in report.valid if r.contact.job_url)
+        st.caption(f"{len(report.job_links)} job link(s) read from the file; {linked} of the {len(report.valid)} "
+                   "contacts to import have a job link. "
+                   f"{len(report.applied_companies)} compan{'y' if len(report.applied_companies) == 1 else 'ies'} "
+                   "marked as applied by direct link.")
 
     if problems:
         st.subheader(f"Rejected ({len(problems)})")
@@ -103,6 +115,11 @@ def page_upload():
         st.dataframe(rejected, hide_index=True, width="stretch")
         st.download_button("Download the rejected rows (CSV)", rejected.to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"{Path(report.filename).stem}_rejected.csv", mime="text/csv")
+    if no_email:
+        with st.expander(f"No email address ({len(no_email)}): founders and HR names without a found email"):
+            st.caption("Not imported: MailMate needs an address to write to. Find their emails and add them to the "
+                       "sheet if you want them included next time.")
+            st.dataframe(_rows_table(no_email, with_problems=False), hide_index=True, width="stretch")
     if duplicates:
         with st.expander(f"Duplicates: {len(duplicates)} rows repeat an address from an earlier row"):
             st.dataframe(_rows_table(duplicates, with_problems=True), hide_index=True, width="stretch")

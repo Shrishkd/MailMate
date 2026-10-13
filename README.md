@@ -218,6 +218,12 @@ streamlit run app.py        # http://localhost:8501, this machine only
    row. A recruiter's own title ("Senior Technical Recruiter") is kept as their title, never used as the
    role. The report shows every rejected row and why; nothing is saved until **Import**. Rows whose
    status says you already emailed them go on the do-not-contact list ("Applied" is not "emailed").
+   **A sheet of openings** (Company + direct apply link, no email column) imports nobody: its links
+   are attached to the contacts at the same company (matched by role when a company has several
+   openings), and an Applied status there marks the company as applied. **A sheet whose name says
+   "Applied"** (e.g. "Applied-20 Contacts"), or a **Group** column saying "Applied", marks all its
+   companies as applied by direct link; the report says so and the checklist lets you untick.
+   Rows without an email (founders, HR names) are listed apart and not imported.
    For people already in MailMate, **Update existing contacts** fills their empty job links and
    priorities from the file (never overwrites) and ticks the companies marked Applied.
    **Contacts** shows everyone with their job link, Applied, and when they were added and drafted
@@ -259,8 +265,8 @@ Matched by header name after lower-casing; the header may be below title rows.
 | Email status | Hunter status, Email Status, Verification | no (`invalid` refused, `accept_all` warned) |
 | Outreach status | Status, Date Sent | no (already sent -> do-not-contact) |
 | Priority | Priority (High / Medium / Low, P1-P3) | no (High goes first in suggestions) |
-| Job link | Direct Apply Link, Apply Link, Job Link, Job URL, Link | no (shown on Contacts, clickable) |
-| Applied (direct link) | Applied, Applied via Link, Applied Directly; or Status "Applied" | no (Yes / ✓ / a date marks the company as applied) |
+| Job link | Direct Apply Link, Apply Link, Job Link, Job URL, Link (a cell that says "Apply here" works: the link behind it is read) | no (shown on Contacts, clickable) |
+| Applied (direct link) | Applied, Applied via Link, Applied On; Status or Group "Applied" | no (Yes / ✓ / a date marks the company as applied) |
 | Requirements | Requirements, Skills, JD | no |
 
 ### Statuses

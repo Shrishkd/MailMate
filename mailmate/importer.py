@@ -15,9 +15,11 @@ import csv
 import io
 import re
 import sqlite3
+import warnings
 from pathlib import Path
+from typing import NamedTuple
 
-import pandas as pd
+import openpyxl
 from docx import Document
 from pydantic import BaseModel
 
@@ -47,19 +49,21 @@ ALIASES = {
                 "job apply link", "careers link",
                 "apply link", "application link"),
     "email_status": ("hunter status", "email status", "verification", "verification status",
-                     "email verification", "verified"),
+                     "email verification", "verified", "email basis", "how the email was found",
+                     "how email was found"),
     "status": ("status", "outreach status", "contact status"),
     "date_sent": ("date sent", "sent on", "sent date", "emailed on", "date emailed"),
     "priority": ("priority", "importance"),
     "applied": ("applied", "applied via link", "applied via direct link", "applied direct link", "applied directly",
-                "applied on site", "applied online", "direct apply", "direct application", "applied status"),
+                "applied on site", "applied online", "direct apply", "direct application", "applied status", "applied on"),
+    "group": ("group", "segment"),
 }
 REQUIRED = ("company", "email")
 FIELD_LABELS = {"company": "Company", "role": "Role applying for", "title": "Their title",
                 "requirements": "Requirements", "email": "Recruiter email", "name": "Recruiter name",
                 "first_name": "First name", "last_name": "Last name", "job_url": "Job URL",
                 "email_status": "Email status", "status": "Status", "date_sent": "Date sent",
-                "priority": "Priority", "applied": "Applied (direct link)"}
+                "priority": "Priority", "applied": "Applied (direct link)", "group": "Group"}
 
 # Spreadsheet stand-ins for "nothing here".
 EMPTY_MARKERS = {"", "-", "--", "—", "–", "n/a", "na", "nil", "none", "null", "nan", "tbd", "?"}
@@ -76,9 +80,11 @@ _CONTACTED = {"sent", "contacted", "emailed", "mailed", "replied", "followed up"
 # "Applied" means I applied through the job link, not that I emailed this recruiter.
 _APPLIED_STATUS = re.compile(r"^applied\b", re.I)
 _YES = {"yes", "y", "true", "1", "x", "done", "applied", "\u2713", "\u2714", "\u2705", "ok"}
-_BAD_ADDRESS = {"invalid", "disposable", "undeliverable", "bounced", "blocked"}
-_RISKY_ADDRESS = {"accept all", "accept_all", "acceptall", "catch all", "catch_all", "unverified", "unknown",
-                  "risky"}
+# The email checker's wording varies ("accept_all", "Hunter pattern-generated, not verified"): match words.
+_BAD_ADDRESS = re.compile(r"\b(?:invalid|disposable|undeliverable|bounced|blocked)\b", re.I)
+_RISKY_ADDRESS = re.compile(r"unverified|not\s+verified|accept[\s_-]?all|catch[\s_-]?all|cannot\s+confirm|"
+                            r"can't\s+confirm|\brisky\b|\bunknown\b", re.I)
+_SHEET_APPLIED = re.compile(r"(?<!not )\bapplied\b", re.I)    # "Applied-20 Contacts", not "Not applied"
 _EXAMPLE_DOMAINS = {"example.com", "example.org", "example.net"}
 _EXAMPLE_TLDS = (".example", ".test", ".invalid", ".localhost")
 
@@ -122,11 +128,20 @@ class SheetReport(BaseModel):
     blank_rows: int = 0               # blank rows and rows with neither company nor email (notes)
 
 
+class JobLink(BaseModel):
+    """One opening from a sheet of job links (a company and where to apply, no recruiter email)."""
+    company: str
+    role: str = ""
+    url: str
+    applied: bool = False
+
+
 class ImportReport(BaseModel):
     filename: str
     file_errors: list[str] = []
     sheets: list[SheetReport] = []
     rows: list[RowResult] = []
+    job_links: list[JobLink] = []
 
     @property
     def columns(self) -> dict[str, str]:
@@ -154,7 +169,7 @@ class ImportReport(BaseModel):
         names: dict[str, str] = {}
         for r in self.rows:
             company = _one_line(r.raw.get("company", ""))
-            if company and (is_applied(r.raw.get("applied", "")) or _APPLIED_STATUS.match(r.raw.get("status", ""))):
+            if company and _row_applied(r.raw):
                 names.setdefault(company_key(company), company)
         return sorted(names.values(), key=str.lower)
 
@@ -199,6 +214,16 @@ class ImportReport(BaseModel):
             lines += [f"         error:   {e}" for e in r.errors]
             lines += [f"         warning: {w}" for w in r.warnings]
         return "\n".join(lines)
+
+
+def _row_applied(raw: dict[str, str]) -> bool:
+    """Applied by direct link: an Applied column (Yes / tick / date), a Status or Group that says Applied."""
+    return (is_applied(raw.get("applied", "")) or bool(_APPLIED_STATUS.match(raw.get("status", "")))
+            or is_applied(raw.get("group", "")))
+
+
+def _sheet_says_applied(name: str) -> bool:
+    return bool(name) and bool(_SHEET_APPLIED.search(name))
 
 
 def is_applied(value: str) -> bool:
@@ -262,10 +287,30 @@ def _read_csv(data: bytes) -> list[list[str]]:
     return [list(r) for r in csv.reader(io.StringIO(text), delimiter=delimiter)]
 
 
-def _read_xlsx(data: bytes) -> list[tuple[str, list[list[str]]]]:
-    frames = pd.read_excel(io.BytesIO(data), sheet_name=None, header=None, dtype=str,
-                           keep_default_na=False, engine="openpyxl")
-    return [(name, frame.values.tolist()) for name, frame in frames.items()]
+class Table(NamedTuple):
+    name: str                                   # "" for CSV and Word files
+    rows: list[list[str]]
+    links: dict[tuple[int, int], str]           # (row, column) -> the web address behind a hyperlinked cell
+
+
+def _read_xlsx(data: bytes) -> list[Table]:
+    """Cell text, plus the address behind hyperlinked cells: a cell that says 'Apply here' keeps its link."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")         # openpyxl warns about Excel features it skips (data validation)
+        workbook = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+    tables = []
+    for sheet in workbook.worksheets:
+        rows, links = [], {}
+        for r, cells in enumerate(sheet.iter_rows()):
+            row = []
+            for c, cell in enumerate(cells):
+                row.append("" if cell.value is None else str(cell.value))
+                target = getattr(cell.hyperlink, "target", None) if cell.hyperlink else None
+                if target and target.lower().startswith(("http://", "https://")):
+                    links[(r, c)] = target
+            rows.append(row)
+        tables.append(Table(sheet.title, rows, links))
+    return tables
 
 
 def _read_docx(data: bytes) -> list[list[str]]:
@@ -277,25 +322,28 @@ def _read_docx(data: bytes) -> list[list[str]]:
     return tables[0] if tables else []
 
 
-def read_tables(filename: str, data: bytes) -> list[tuple[str, list[list[str]]]]:
-    """[(sheet name, rows)]. CSV and Word files have one table with no sheet name."""
+def read_tables(filename: str, data: bytes) -> list[Table]:
+    """One Table per sheet. CSV and Word files have one table with no sheet name."""
     suffix = Path(filename).suffix.lower()
     if suffix == ".csv":
-        tables = [("", _read_csv(data))]
+        tables = [Table("", _read_csv(data), {})]
     elif suffix == ".xlsx":
         tables = _read_xlsx(data)
     elif suffix == ".docx":
-        tables = [("", _read_docx(data))]
+        tables = [Table("", _read_docx(data), {})]
     else:
         raise ValueError(f"unsupported file type '{suffix}'; use {', '.join(SUPPORTED)}")
-    return [(name, [[_clean(c) for c in r] for r in rows]) for name, rows in tables]
+    return [Table(t.name, [[_clean(c) for c in r] for r in t.rows], t.links) for t in tables]
 
 
-def _find_header(table: list[list[str]]) -> int | None:
-    """Index of the first row (within the first few) that has a company and an email column."""
+LINK_REQUIRED = ("company", "job_url")
+
+
+def _find_header(table: list[list[str]], required: tuple[str, ...] = REQUIRED) -> int | None:
+    """Index of the first row (within the first few) that has the required columns (company + email)."""
     for i, cells in enumerate(table[:HEADER_SEARCH_ROWS]):
         fields = {_ALIAS_LOOKUP.get(_norm_header(_clean(c))) for c in cells}
-        if set(REQUIRED) <= fields:
+        if set(required) <= fields:
             return i
     return None
 
@@ -303,14 +351,54 @@ def _find_header(table: list[list[str]]) -> int | None:
 def job_sheets(filename: str, data: bytes) -> list[str]:
     """Workbook sheets that look like contact lists (have Company + Email headers). [] for CSV/Word."""
     try:
-        return [name for name, rows in read_tables(filename, data) if name and _find_header(rows) is not None]
+        return [t.name for t in read_tables(filename, data) if t.name and _find_header(t.rows) is not None]
     except Exception:
         return []
 
 
+def _link_url(text: str, link: str | None) -> str:
+    """A cell that says 'Apply here' is worth its hyperlink; a cell that is itself an address stays."""
+    text = text.strip()
+    return link if link and not re.match(r"https?://", text, re.I) else text
+
+
+def _read_link_sheet(table: Table) -> tuple[SheetReport, list[JobLink]] | None:
+    """A sheet of openings: Company + a job link and no email column (those sheets hold contacts)."""
+    header_index = _find_header(table.rows, LINK_REQUIRED)
+    if header_index is None or _find_header(table.rows) is not None:
+        return None
+    columns, ignored, _ = map_columns(table.rows[header_index], LINK_REQUIRED)
+    sheet = SheetReport(name=table.name, header_row=header_index + 1, ignored_columns=ignored,
+                        columns={f: table.rows[header_index][i] for f, i in columns.items()})
+    links = []
+    for offset, cells in enumerate(table.rows[header_index + 1:]):
+        raw = {f: (cells[i] if i < len(cells) else "") for f, i in columns.items()}
+        url = _link_url(raw.get("job_url", ""), table.links.get((header_index + 1 + offset, columns["job_url"])))
+        company = _one_line(raw.get("company", ""))
+        if not company or not re.match(r"https?://\S+$", url):
+            sheet.blank_rows += 1
+            continue
+        links.append(JobLink(company=company, role=_one_line(raw.get("role", "")), url=url, applied=_row_applied(raw)))
+    sheet.notes.append(f"{len(links)} job link(s) found ({sum(link.applied for link in links)} marked applied). "
+                       "They're attached to the contacts at the same company; nobody is imported from this sheet")
+    return sheet, links
+
+
+def pick_link(links: list[JobLink], role: str) -> JobLink | None:
+    """The opening this contact's role names; otherwise the company's first link."""
+    if not links:
+        return None
+    wanted = _norm_header(role)
+    for link in links:
+        opening = _norm_header(link.role)
+        if opening and wanted and (opening in wanted or wanted in opening):
+            return link
+    return links[0]
+
+
 # --- checking -----------------------------------------------------------------------------
 
-def map_columns(header: list[str]) -> tuple[dict[str, int], list[str], list[str]]:
+def map_columns(header: list[str], required: tuple[str, ...] = REQUIRED) -> tuple[dict[str, int], list[str], list[str]]:
     """Header row -> ({field: column index}, ignored headers, errors)."""
     columns: dict[str, int] = {}
     ignored, errors = [], []
@@ -325,7 +413,7 @@ def map_columns(header: list[str]) -> tuple[dict[str, int], list[str], list[str]
                           f"and '{text}'; rename or delete one")
         else:
             columns[field] = i
-    for field in REQUIRED:
+    for field in required:
         if field not in columns:
             names = ", ".join(f"'{a}'" for a in ALIASES[field][:4])
             errors.append(f"no '{FIELD_LABELS[field]}' column found (accepted headers include {names})")
@@ -376,10 +464,10 @@ def check_row(raw: dict[str, str], row: int, check_domain: DomainChecker, defaul
         result.errors.append(f"already contacted outside MailMate ({said}); MailMate never emails an address twice")
         result.contacted_elsewhere = bool(result.raw.get("_address"))
 
-    verification = _norm_header(raw.get("email_status", "")).replace(" ", "_")
-    if verification.replace("_", " ") in _BAD_ADDRESS:
+    verification = raw.get("email_status", "")
+    if _BAD_ADDRESS.search(verification):
         result.errors.append(f"the email checker says this address is {raw['email_status']}")
-    elif verification in _RISKY_ADDRESS or verification.replace("_", " ") in _RISKY_ADDRESS:
+    elif _RISKY_ADDRESS.search(verification):
         result.warnings.append(f"may bounce: the mail server can't confirm this mailbox exists "
                                f"(email status '{raw['email_status']}')")
 
@@ -394,7 +482,7 @@ def check_row(raw: dict[str, str], row: int, check_domain: DomainChecker, defaul
         result.contact = Contact(company=company, role=role, requirements=raw.get("requirements", "").strip(),
                                  email=address.email, job_url=job_url, name=name,
                                  title=_one_line(raw.get("title", "")), priority=normalize_priority(raw.get("priority", "")),
-                                 applied=is_applied(raw.get("applied", "")) or bool(_APPLIED_STATUS.match(raw.get("status", ""))))
+                                 applied=_row_applied(raw))
     return result
 
 
@@ -416,17 +504,19 @@ def analyse(filename: str, data: bytes, conn: sqlite3.Connection, check_domain: 
                                   f"{Path(filename).suffix} file?")
         return report
 
-    tables = [(name, rows) for name, rows in tables if any(any(r) for r in rows)]
+    tables = [t for t in tables if any(any(r) for r in t.rows)]
     if not tables:
         report.file_errors.append("the file is empty")
         return report
+    link_sheets = [found for found in (_read_link_sheet(t) for t in tables) if found]   # always read: they only add links
+    report.job_links = [link for _, found in link_sheets for link in found]
     if sheets is not None:
-        tables = [(name, rows) for name, rows in tables if name in sheets]
+        tables = [t for t in tables if t.name in sheets]
         if not tables:
             report.file_errors.append("no sheet selected")
             return report
     elif len(tables) > 1:
-        usable = [(name, rows) for name, rows in tables if _find_header(rows) is not None]
+        usable = [t for t in tables if _find_header(t.rows) is not None]
         if not usable:
             report.file_errors.append("no sheet has both a Company and an Email column in its first "
                                       f"{HEADER_SEARCH_ROWS} rows")
@@ -435,7 +525,7 @@ def analyse(filename: str, data: bytes, conn: sqlite3.Connection, check_domain: 
 
     # Pass 1: find each sheet's header and columns.
     parsed = []
-    for name, table in tables:
+    for name, table, links in tables:
         header_index = _find_header(table)
         if header_index is None:
             header_index = next(i for i, r in enumerate(table) if any(r))
@@ -455,8 +545,13 @@ def analyse(filename: str, data: bytes, conn: sqlite3.Connection, check_domain: 
             sheet.notes.append(f"'{role_header}' mostly holds recruiter/HR titles, so it's kept as their title; "
                                "the role you're applying for comes from the box above the upload")
         sheet.columns = {f: table[header_index][i] for f, i in columns.items()}
+        sheet_applied = _sheet_says_applied(name)
+        if sheet_applied:
+            sheet.notes.append(f"the sheet is named '{name}', so every company in it is marked as applied by "
+                               "direct link (untick any that aren't on the Contacts page)")
         report.sheets.append(sheet)
-        parsed.append((sheet, columns, header_index, body))
+        parsed.append((sheet, columns, header_index, body, links, sheet_applied))
+    report.sheets += [sheet for sheet, _ in link_sheets]
     if report.file_errors:
         return report
 
@@ -464,13 +559,26 @@ def analyse(filename: str, data: bytes, conn: sqlite3.Connection, check_domain: 
     existing, blocked = db.known_contacts(conn), db.suppressed(conn)
     first_seen: dict[str, str] = {}
     results = []
-    for sheet, columns, header_index, body in parsed:
+    links_by_company: dict[str, list[JobLink]] = {}
+    for link in report.job_links:
+        links_by_company.setdefault(company_key(link.company), []).append(link)
+    applied_by_link = {company_key(link.company) for link in report.job_links if link.applied}
+    for sheet, columns, header_index, body, links, sheet_applied in parsed:
         for offset, cells in enumerate(body):
             row = header_index + offset + 2
             raw = {f: (cells[i] if i < len(cells) else "") for f, i in columns.items()}
             if not raw.get("company") and not raw.get("email"):
                 sheet.blank_rows += 1      # blank, or a note below the table
                 continue
+            if "job_url" in columns:       # 'Apply here' -> the address behind it
+                raw["job_url"] = _link_url(raw["job_url"], links.get((header_index + 1 + offset, columns["job_url"])))
+            key = company_key(raw.get("company", ""))
+            if not raw.get("job_url"):     # a sheet of openings knows where to apply
+                match = pick_link(links_by_company.get(key, []), raw.get("role") or default_role)
+                if match:
+                    raw["job_url"] = match.url
+            if (sheet_applied or key in applied_by_link) and not _row_applied(raw):
+                raw["applied"] = "Yes"
             results.append(check_row(raw, row, check_domain, default_role, sheet.name))
     contacted = {r.raw["_address"] for r in results if r.contacted_elsewhere}
 
