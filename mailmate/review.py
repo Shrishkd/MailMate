@@ -20,6 +20,7 @@ import sqlite3
 from pydantic import BaseModel
 
 from mailmate import db
+from mailmate.companies import applied_keys, company_key
 from mailmate.n8n import Source
 from mailmate.sentence_check import PersonalLine, check_sentence
 from mailmate.templates import FOLLOW_UP_TEMPLATE, OPT_OUT_LINE, Template, latest_templates, merge, values_for
@@ -80,13 +81,16 @@ def _merged(row, settings: dict[str, str], sentence: str, template: Template | N
 # --- drafting -----------------------------------------------------------------------------
 
 def contacts_to_draft(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Contacts that can get a first email: new, not on the do-not-contact list."""
-    return conn.execute(
+    """Contacts that can get a first email: new, not on the do-not-contact list. Companies I applied
+    to by direct link first, then by priority, then file order."""
+    applied = applied_keys(conn)
+    rows = conn.execute(
         "SELECT * FROM contacts c WHERE c.status = 'new'"
         " AND c.email NOT IN (SELECT email FROM suppression)"
         " AND NOT EXISTS (SELECT 1 FROM emails e WHERE e.contact_id = c.id AND e.status != 'rejected')"
         " ORDER BY CASE c.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, c.id"
         ).fetchall()
+    return sorted(rows, key=lambda c: company_key(c["company"]) not in applied)   # stable: keeps the rest
 
 
 def create_draft(conn: sqlite3.Connection, contact_id: int, template: Template, line: PersonalLine) -> int:

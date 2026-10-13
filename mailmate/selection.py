@@ -1,4 +1,5 @@
-"""Who goes next: one recruiter per company at a time, High priority first.
+"""Who goes next: one recruiter per company at a time; companies I applied to by direct link first,
+then High priority.
 
 Recruiters at one company talk to each other. Several near-identical emails on one morning read as
 mass mailing and use up every chance at that company at once. So a company is:
@@ -13,27 +14,26 @@ My own test address never counts. Suggestions pre-tick a sensible set; I can sti
 real batch that breaks the company rule is refused (see sending.plan_real_batch).
 """
 
-import re
 import sqlite3
 from datetime import datetime, timedelta
 
 from pydantic import BaseModel
 
 from mailmate import followups
+from mailmate.companies import applied_keys, company_key  # noqa: F401  (company_key is used by sending)
 
 PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2, "": 3}
-_LEGAL_SUFFIXES = {"inc", "ltd", "llc", "pvt", "private", "limited", "corp", "corporation", "co", "plc", "gmbh"}
 _IST_OFFSET = timedelta(hours=5, minutes=30)
-
-
-def company_key(name: str) -> str:
-    """'Lexsi.ai' and 'Lexsi AI' are one company; 'Acme Pvt. Ltd.' and 'Acme' too."""
-    words = re.findall(r"[a-z0-9]+", name.lower())
-    return " ".join([w for w in words if w not in _LEGAL_SUFFIXES] or words)
 
 
 def priority_rank(priority: str | None) -> int:
     return PRIORITY_ORDER.get(priority or "", 3)
+
+
+def order_key(applied: set[str]):
+    """Applied-by-link companies first, then High, Medium, Low, none; then file order."""
+    return lambda c: (company_key(c["company"]) not in applied, priority_rank(c["priority"]), c["contact_id"]
+                      if "contact_id" in c.keys() else c["id"])
 
 
 class CompanyBlock(BaseModel):
@@ -93,7 +93,7 @@ def suggest_drafts(conn: sqlite3.Connection, candidates: list, now: datetime, te
     that are waiting, closed or already have a draft in the queue are left out."""
     blocked = set(company_blocks(conn, now, test_to)) | _pending_companies(conn, test_to)
     chosen, seen = [], set()
-    for c in sorted(candidates, key=lambda c: (priority_rank(c["priority"]), c["id"])):
+    for c in sorted(candidates, key=order_key(applied_keys(conn))):
         key = company_key(c["company"])
         if key in blocked or key in seen or c["email"].lower() == test_to.lower():
             continue
@@ -115,7 +115,7 @@ def suggest_send(conn: sqlite3.Connection, candidates: list, now: datetime, test
         template_id = follow_ups[0]["template_id"]
         return [c["id"] for c in follow_ups if c["template_id"] == template_id][:limit]
     blocked = company_blocks(conn, now, test_to)
-    ordered = sorted(candidates, key=lambda c: (priority_rank(c["priority"]), c["id"]))
+    ordered = sorted(candidates, key=order_key(applied_keys(conn)))
     chosen, seen, template_id = [], set(), None
     for c in ordered:
         key = company_key(c["company"])

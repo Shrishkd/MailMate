@@ -217,13 +217,18 @@ streamlit run app.py        # http://localhost:8501, this machine only
    are fine) or a Word table. Type the role you're applying for; a *Target Role* column overrides it per
    row. A recruiter's own title ("Senior Technical Recruiter") is kept as their title, never used as the
    role. The report shows every rejected row and why; nothing is saved until **Import**. Rows whose
-   status says you already emailed them go on the do-not-contact list.
+   status says you already emailed them go on the do-not-contact list ("Applied" is not "emailed").
+   For people already in MailMate, **Update existing contacts** fills their empty job links and
+   priorities from the file (never overwrites) and ticks the companies marked Applied.
+   **Contacts** shows everyone with their job link, Applied, and when they were added and drafted
+   (DD/MM/YYYY T HH:MM:SS, India time), plus the **checklist of companies you applied to by direct
+   link**: tick, untick, Save.
 2. **Templates:** your name and signature, and templates with merge fields `{first_name} {company}
    {role} {personal_line} {my_name} {signature}`. Saving a change creates a new version. The
    *Follow-up* template is the text of the one follow-up.
 3. **Review:** create drafts (W1 researches each company), then approve, edit or reject each email.
-   The list is pre-ticked with a suggestion: one recruiter per company, High priority first, then
-   file order; companies that are waiting or closed are left out (listed under the list).
+   The list is pre-ticked with a suggestion: one recruiter per company, companies you applied to by
+   direct link first, then High priority, then file order; companies that are waiting or closed are left out (listed under the list).
    Problems need a ticked override with a reason; do-not-contact and "already contacted" can't be
    overridden. *Follow-ups due* lists first emails with no reply after N days.
 4. **Send:** upload the resume PDF (under 1 MB). Send 1-3 drafts as a **test** to your own inbox and
@@ -254,7 +259,9 @@ Matched by header name after lower-casing; the header may be below title rows.
 | Email status | Hunter status, Email Status, Verification | no (`invalid` refused, `accept_all` warned) |
 | Outreach status | Status, Date Sent | no (already sent -> do-not-contact) |
 | Priority | Priority (High / Medium / Low, P1-P3) | no (High goes first in suggestions) |
-| Requirements, Job URL | Requirements, Skills, JD; Job URL, Link | no |
+| Job link | Direct Apply Link, Apply Link, Job Link, Job URL, Link | no (shown on Contacts, clickable) |
+| Applied (direct link) | Applied, Applied via Link, Applied Directly; or Status "Applied" | no (Yes / ✓ / a date marks the company as applied) |
+| Requirements | Requirements, Skills, JD | no |
 
 ### Statuses
 
@@ -292,7 +299,8 @@ or rejected. Every change is written to the append-only `events` table.
 | `mailmate/sending.py` | Test batches, real batches and their limits |
 | `mailmate/sync.py` | Applying W3's answer: sent, replies, bounces, do-not-contact |
 | `mailmate/followups.py` | The one follow-up |
-| `mailmate/selection.py` | One recruiter per company at a time; suggestions by priority |
+| `mailmate/selection.py` | One recruiter per company at a time; suggestions: applied first, then priority |
+| `mailmate/companies.py` | One name per company; the applied-by-direct-link checklist |
 | `mailmate/stats.py` | Dashboard numbers |
 | `mailmate/db.py` | SQLite schema with the safety rules enforced in the database |
 | `n8n/workflows/` | W1, W2, W3 exports (no credentials) |

@@ -22,6 +22,7 @@ from docx import Document
 from pydantic import BaseModel
 
 from mailmate import db
+from mailmate.companies import company_key
 from mailmate.emailcheck import DomainChecker, parse_address
 
 SUPPORTED = (".csv", ".xlsx", ".docx")
@@ -41,20 +42,24 @@ ALIASES = {
              "contact person", "hiring manager", "full name"),
     "first_name": ("first name", "firstname", "given name"),
     "last_name": ("last name", "lastname", "surname", "family name"),
-    "job_url": ("job url", "url", "link", "job link", "posting", "posting url", "job posting",
+    "job_url": ("job url", "url", "link", "job link", "posting", "posting url", "job posting", "direct link",
+                "direct apply link", "direct job link", "apply url", "apply here", "application url",
+                "job apply link", "careers link",
                 "apply link", "application link"),
     "email_status": ("hunter status", "email status", "verification", "verification status",
                      "email verification", "verified"),
     "status": ("status", "outreach status", "contact status"),
     "date_sent": ("date sent", "sent on", "sent date", "emailed on", "date emailed"),
     "priority": ("priority", "importance"),
+    "applied": ("applied", "applied via link", "applied via direct link", "applied direct link", "applied directly",
+                "applied on site", "applied online", "direct apply", "direct application", "applied status"),
 }
 REQUIRED = ("company", "email")
 FIELD_LABELS = {"company": "Company", "role": "Role applying for", "title": "Their title",
                 "requirements": "Requirements", "email": "Recruiter email", "name": "Recruiter name",
                 "first_name": "First name", "last_name": "Last name", "job_url": "Job URL",
                 "email_status": "Email status", "status": "Status", "date_sent": "Date sent",
-                "priority": "Priority"}
+                "priority": "Priority", "applied": "Applied (direct link)"}
 
 # Spreadsheet stand-ins for "nothing here".
 EMPTY_MARKERS = {"", "-", "--", "—", "–", "n/a", "na", "nil", "none", "null", "nan", "tbd", "?"}
@@ -67,7 +72,10 @@ _HR_TITLE = re.compile(r"\b(?:recruit\w*|talent|hr|human\s+resources?|hiring|peo
                        r"sourc\w*|general\s+contact|careers?|contact|inbox)\b", re.I)
 # Status values meaning "I already emailed this person outside MailMate" (rule 5).
 _CONTACTED = {"sent", "contacted", "emailed", "mailed", "replied", "followed up", "follow up sent", "bounced",
-              "not interested", "interviewing", "interview", "rejected", "closed", "done", "applied"}
+              "not interested", "interviewing", "interview", "rejected", "closed", "done"}
+# "Applied" means I applied through the job link, not that I emailed this recruiter.
+_APPLIED_STATUS = re.compile(r"^applied\b", re.I)
+_YES = {"yes", "y", "true", "1", "x", "done", "applied", "\u2713", "\u2714", "\u2705", "ok"}
 _BAD_ADDRESS = {"invalid", "disposable", "undeliverable", "bounced", "blocked"}
 _RISKY_ADDRESS = {"accept all", "accept_all", "acceptall", "catch all", "catch_all", "unverified", "unknown",
                   "risky"}
@@ -84,6 +92,7 @@ class Contact(BaseModel):
     title: str = ""           # the recruiter's own job title, for context only
     job_url: str = ""
     priority: str = ""        # 'high' | 'medium' | 'low' | '' : who goes first in suggestions
+    applied: bool = False     # I applied to this company through the job's own link
 
 
 class RowResult(BaseModel):
@@ -140,6 +149,31 @@ class ImportReport(BaseModel):
         return [r for r in self.rows if not r.ok]
 
     @property
+    def applied_companies(self) -> list[str]:
+        """Companies this file marks as applied by direct link (any row, imported or not)."""
+        names: dict[str, str] = {}
+        for r in self.rows:
+            company = _one_line(r.raw.get("company", ""))
+            if company and (is_applied(r.raw.get("applied", "")) or _APPLIED_STATUS.match(r.raw.get("status", ""))):
+                names.setdefault(company_key(company), company)
+        return sorted(names.values(), key=str.lower)
+
+    @property
+    def known_updates(self) -> list[dict]:
+        """Rows of people who are already contacts: the job link and priority this file has for them
+        (MailMate only ever fills empty fields with these, see db.fill_contact_blanks)."""
+        out = []
+        for r in self.rows:
+            if not r.raw.get("_address") or not any(e.startswith("already a contact") for e in r.errors):
+                continue
+            link = r.raw.get("job_url", "").strip()
+            link = link if re.match(r"https?://\S+$", link) else ""
+            priority = normalize_priority(r.raw.get("priority", ""))
+            if link or priority:
+                out.append({"email": r.raw["_address"], "job_url": link, "priority": priority})
+        return out
+
+    @property
     def contacted_elsewhere(self) -> list[str]:
         """Valid addresses already emailed outside MailMate: they go on the do-not-contact list."""
         return sorted({r.raw["_address"] for r in self.rows if r.contacted_elsewhere and r.raw.get("_address")})
@@ -165,6 +199,14 @@ class ImportReport(BaseModel):
             lines += [f"         error:   {e}" for e in r.errors]
             lines += [f"         warning: {w}" for w in r.warnings]
         return "\n".join(lines)
+
+
+def is_applied(value: str) -> bool:
+    """'Yes', a tick, 'Applied' or a date (when I applied) -> True; 'No' or empty -> False."""
+    text = _clean(value).lower()
+    if not text or text in {"no", "n", "false", "0", "not yet", "pending"}:
+        return False
+    return text in _YES or text.startswith("applied") or bool(re.match(r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}", text))
 
 
 def normalize_priority(value: str) -> str:
@@ -351,7 +393,8 @@ def check_row(raw: dict[str, str], row: int, check_domain: DomainChecker, defaul
                 or address.display_name)
         result.contact = Contact(company=company, role=role, requirements=raw.get("requirements", "").strip(),
                                  email=address.email, job_url=job_url, name=name,
-                                 title=_one_line(raw.get("title", "")), priority=normalize_priority(raw.get("priority", "")))
+                                 title=_one_line(raw.get("title", "")), priority=normalize_priority(raw.get("priority", "")),
+                                 applied=is_applied(raw.get("applied", "")) or bool(_APPLIED_STATUS.match(raw.get("status", ""))))
     return result
 
 

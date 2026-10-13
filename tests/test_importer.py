@@ -62,7 +62,7 @@ def test_csv(conn, fake_dns):
     assert row.contact.model_dump() == {
         "company": "Nimbus Labs", "role": "GenAI Engineer", "requirements": "Python, RAG",
         "email": "priya@nimbuslabs.ai", "name": "Priya", "title": "", "job_url": "https://nimbuslabs.ai/j/1",
-        "priority": ""}
+        "priority": "", "applied": False}
 
 
 def test_xlsx(conn, fake_dns):

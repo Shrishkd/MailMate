@@ -117,6 +117,14 @@ CREATE TABLE IF NOT EXISTS suppression (
     created_at  TEXT NOT NULL
 );
 
+-- Companies I applied to through the job's own link: they go first in suggestions.
+CREATE TABLE IF NOT EXISTS applied_companies (
+    company_key  TEXT PRIMARY KEY,
+    company      TEXT NOT NULL,
+    source       TEXT NOT NULL DEFAULT '',     -- 'checklist' or the job list's file name
+    applied_at   TEXT NOT NULL
+);
+
 -- Personal settings (name, signature...). Kept here, not in code, because data/ is git-ignored.
 CREATE TABLE IF NOT EXISTS settings (
     key         TEXT PRIMARY KEY,
@@ -208,6 +216,20 @@ def suppress(conn: sqlite3.Connection, email: str, reason: str, note: str = "") 
             (email.strip().lower(), reason, note, now()),
         )
         log_event(conn, "suppressed", email=email.strip().lower(), reason=reason)
+
+
+def fill_contact_blanks(conn: sqlite3.Connection, updates: list[dict], source_file: str) -> int:
+    """Fill EMPTY job links and priorities of existing contacts (never overwrites). Returns contacts changed."""
+    changed = 0
+    with conn:
+        for u in updates:
+            changed += conn.execute(
+                "UPDATE contacts SET job_url = CASE WHEN job_url = '' THEN ? ELSE job_url END,"
+                " priority = CASE WHEN priority = '' THEN ? ELSE priority END"
+                " WHERE lower(email) = lower(?) AND ((job_url = '' AND ? != '') OR (priority = '' AND ? != ''))",
+                (u["job_url"], u["priority"], u["email"], u["job_url"], u["priority"])).rowcount
+        log_event(conn, "contacts_filled", source_file=source_file, contacts=changed)
+    return changed
 
 
 def add_contacts(conn: sqlite3.Connection, contacts: list, source_file: str) -> tuple[int, list[str]]:

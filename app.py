@@ -11,7 +11,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from mailmate import db, followups, review, selection, sending, stats
+from mailmate import companies, db, followups, review, selection, sending, stats
 from mailmate.config import DB_PATH, RESUME_PATH, ConfigError, n8n_settings, test_address
 from mailmate.emailcheck import DnsDomainChecker
 from mailmate.importer import FIELD_LABELS, SUPPORTED, ImportReport, analyse, job_sheets
@@ -122,6 +122,8 @@ def page_upload():
         for email in report.contacted_elsewhere:
             db.suppress(conn, email, "manual", note=f"contacted outside MailMate ({report.filename})")
         added, skipped = db.add_contacts(conn, [r.contact for r in report.valid], report.filename)
+        for company in report.applied_companies:
+            companies.set_applied(conn, company, True, source=report.filename)
         if default_role.strip():
             db.set_settings(conn, default_role=default_role)
         st.session_state.pop("report_key", None)
@@ -129,16 +131,80 @@ def page_upload():
         if skipped:
             st.warning(f"{len(skipped)} skipped because they became contacts or were put on the "
                        f"do-not-contact list meanwhile: {', '.join(skipped)}")
+    _update_existing(report)
+
+
+def _update_existing(report: ImportReport) -> None:
+    """People already in MailMate are skipped on import; their new job links, priorities and Applied
+    marks can still be taken from the file. Only empty fields are filled; nothing is overwritten."""
+    updates = report.known_updates
+    already = companies.applied_keys(conn)
+    new_applied = [c for c in report.applied_companies if companies.company_key(c) not in already]
+    if not updates and not new_applied:
+        return
+    st.subheader("Update existing contacts from this file")
+    parts = []
+    if updates:
+        parts.append(f"fill empty job links / priorities for up to {len(updates)} existing contact(s)")
+    if new_applied:
+        parts.append(f"tick {len(new_applied)} compan{'y' if len(new_applied) == 1 else 'ies'} as applied by direct "
+                     f"link: {', '.join(new_applied)}")
+    st.caption("This file has: " + "; ".join(parts) + ". Existing values are never overwritten.")
+    if st.button("Update existing contacts"):
+        changed = db.fill_contact_blanks(conn, updates, report.filename)
+        for company in new_applied:
+            companies.set_applied(conn, company, True, source=report.filename)
+        st.success(f"Filled {changed} contact(s); {len(new_applied)} compan{'y' if len(new_applied) == 1 else 'ies'} "
+                   "added to the applied checklist.")
+
+
+def _ist(timestamp: str | None) -> str:
+    """Stored UTC timestamp -> India time as DD/MM/YYYY T HH:MM:SS."""
+    if not timestamp:
+        return ""
+    return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(sending.IST).strftime("%d/%m/%Y T %H:%M:%S")
 
 
 def page_contacts():
     st.title("Contacts")
-    contacts = pd.read_sql_query(
-        "SELECT company, role, email, name, title, priority, status, source_file, created_at FROM contacts ORDER BY id DESC", conn)
-    if contacts.empty:
+    applied = companies.applied_keys(conn)
+    rows = conn.execute(
+        "SELECT c.*, (SELECT MIN(e.created_at) FROM emails e WHERE e.contact_id = c.id AND e.kind = 'initial'"
+        " AND e.status != 'rejected') AS drafted_at FROM contacts c ORDER BY c.id DESC").fetchall()
+    if not rows:
         st.info("No contacts yet. Upload a job list first.")
     else:
-        st.dataframe(contacts, hide_index=True, width="stretch")
+        st.caption("Times are India time (DD/MM/YYYY T HH:MM:SS). 'Drafted at' = when the first email was drafted.")
+        st.dataframe(pd.DataFrame([{
+            "Company": r["company"], "Role": r["role"], "Email": r["email"], "Job link": r["job_url"] or None,
+            "Name": r["name"], "Title": r["title"], "Priority": (r["priority"] or "").title(),
+            "Applied": companies.company_key(r["company"]) in applied, "Status": r["status"],
+            "Added": _ist(r["created_at"]), "Drafted at": _ist(r["drafted_at"]), "Source file": r["source_file"],
+        } for r in rows]), hide_index=True, width="stretch", column_config={
+            "Job link": st.column_config.LinkColumn("Job link", display_text="Open job"),
+            "Applied": st.column_config.CheckboxColumn("Applied", help="Applied via the direct job link"),
+        })
+
+    st.subheader("Companies I applied to (direct link)")
+    st.caption("Tick the companies where you've applied through the job's own link: they go first whenever "
+               "MailMate suggests whom to email, ahead of High priority. Still one recruiter per company at a time.")
+    items = companies.checklist(conn)
+    if items:
+        table = pd.DataFrame([{"Applied": i["applied"], "Company": i["company"],
+                               "Job link": i["links"][0] if i["links"] else None,
+                               "Other links": len(i["links"]) - 1 if i["links"] else 0,
+                               "Applied at": _ist(i["applied_at"])} for i in items])
+        edited = st.data_editor(table, hide_index=True, width="stretch", key="applied_checklist",
+                                disabled=["Company", "Job link", "Other links", "Applied at"],
+                                column_config={"Applied": st.column_config.CheckboxColumn("Applied"),
+                                               "Job link": st.column_config.LinkColumn("Job link", display_text="Open job")})
+        changes = [(i["company"], bool(new)) for i, new in zip(items, edited["Applied"]) if bool(new) != i["applied"]]
+        st.caption(f"{sum(i['applied'] for i in items)} of {len(items)} companies ticked."
+                   + (f" {len(changes)} unsaved change(s)." if changes else ""))
+        if st.button("Save checklist", disabled=not changes):
+            for company, value in changes:
+                companies.set_applied(conn, company, value)
+            st.rerun()
     st.subheader("Do-not-contact list")
     blocked = pd.read_sql_query("SELECT email, reason, note, created_at FROM suppression ORDER BY created_at DESC", conn)
     st.caption("Anyone who bounces or says they're not interested is added automatically. "
@@ -418,6 +484,8 @@ DRAFT_SUGGESTION = 10     # W1 takes 5-30 s per contact, so suggest a batch that
 
 def _who(row) -> str:
     tag = {"high": "[High] ", "medium": "[Medium] ", "low": "[Low] "}.get(row["priority"] or "", "")
+    if companies.company_key(row["company"]) in companies.applied_keys(conn):
+        tag = "[Applied] " + tag
     return f"{tag}{row['company']} · {row['name'] or '-'} · {row['email']}"
 
 
@@ -466,7 +534,12 @@ def page_review():
             chosen = st.multiselect(
                 "Contacts (at most 20 per run)", list(options), default=suggested, max_selections=20,
                 format_func=lambda i: _who(options[i]))
-            st.caption(f"Pre-ticked: {len(suggested)} suggested, one recruiter per company, High priority first, "
+            if not suggested:
+                st.info("Nothing pre-ticked: every company left is waiting on an earlier email (6 days) or already "
+                        "has an email in the queue, so its other recruiters wait their turn. New companies from your "
+                        "next upload will be suggested right away. You can still tick someone by hand.")
+            st.caption(f"Pre-ticked: {len(suggested)} suggested, one recruiter per company: companies you applied to "
+                       "by direct link first, then High priority, "
                        "skipping companies that are waiting, closed, or already have a draft. Change it freely. "
                        "W1 researches each company (about 5-30 s each). Keep this tab open while it runs.")
             _company_blocks_note(now, test_to)
@@ -694,7 +767,8 @@ def _real_sending(test_to: str, settings: dict[str, str]) -> None:
             format_func=lambda i: f"#{i} " + ("follow-up · " if options[i]["kind"] == "follow_up" else "")
                                   + _who(options[i]))
         st.caption(f"Pre-ticked: {len(suggested)} suggested ({why}): follow-ups first, otherwise one recruiter per "
-                   "free company, High priority first. Change it freely; the rules are checked again below."
+                   "free company, applied-by-link companies first, then High priority. Change it freely; the rules are "
+                   "checked again below."
                    if room else f"Nothing pre-ticked: {why}. A batch to your own test address can still go.")
         _company_blocks_note(now, test_to)
         if chosen:
