@@ -234,7 +234,10 @@ streamlit run app.py        # http://localhost:8501, this machine only
    *Follow-up* template is the text of the one follow-up.
 3. **Review:** create drafts (W1 researches each company), then approve, edit or reject each email.
    The list is pre-ticked with a suggestion: one recruiter per company, companies you applied to by
-   direct link first, then High priority, then file order; companies that are waiting or closed are left out (listed under the list).
+   direct link first, then High priority, then file order. Contacts at companies you applied to get
+   the **Applied outreach** template automatically ("I recently applied for the {role} role at
+   {company} through your careers page..."), created from your template the first time and editable
+   like any other; it needs its own test email before real sending, and goes out in its own batches; companies that are waiting or closed are left out (listed under the list).
    Problems need a ticked override with a reason; do-not-contact and "already contacted" can't be
    overridden. *Follow-ups due* lists first emails with no reply after N days.
 4. **Send:** upload the resume PDF (under 1 MB). Send 1-3 drafts as a **test** to your own inbox and
@@ -264,7 +267,7 @@ Matched by header name after lower-casing; the header may be below title rows.
 | Name | Name, Recruiter Name, Contact; or First Name + Last Name | no |
 | Email status | Hunter status, Email Status, Verification | no (`invalid` refused, `accept_all` warned) |
 | Outreach status | Status, Date Sent | no (already sent -> do-not-contact) |
-| Priority | Priority (High / Medium / Low, P1-P3) | no (High goes first in suggestions) |
+| Priority | Priority, Fit (High / Medium / Low, P1-P3); an opening's Fit carries over to its contacts | no (High goes first, after applied companies) |
 | Job link | Direct Apply Link, Apply Link, Job Link, Job URL, Link (a cell that says "Apply here" works: the link behind it is read) | no (shown on Contacts, clickable) |
 | Applied (direct link) | Applied, Applied via Link, Applied On; Status or Group "Applied" | no (Yes / ✓ / a date marks the company as applied) |
 | Requirements | Requirements, Skills, JD | no |

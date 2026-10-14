@@ -53,7 +53,7 @@ ALIASES = {
                      "how email was found"),
     "status": ("status", "outreach status", "contact status"),
     "date_sent": ("date sent", "sent on", "sent date", "emailed on", "date emailed"),
-    "priority": ("priority", "importance"),
+    "priority": ("priority", "importance", "fit", "job fit", "match"),
     "applied": ("applied", "applied via link", "applied via direct link", "applied direct link", "applied directly",
                 "applied on site", "applied online", "direct apply", "direct application", "applied status", "applied on"),
     "group": ("group", "segment"),
@@ -134,6 +134,7 @@ class JobLink(BaseModel):
     role: str = ""
     url: str
     applied: bool = False
+    priority: str = ""        # from a Priority or Fit column: 'high' | 'medium' | 'low' | ''
 
 
 class ImportReport(BaseModel):
@@ -378,7 +379,8 @@ def _read_link_sheet(table: Table) -> tuple[SheetReport, list[JobLink]] | None:
         if not company or not re.match(r"https?://\S+$", url):
             sheet.blank_rows += 1
             continue
-        links.append(JobLink(company=company, role=_one_line(raw.get("role", "")), url=url, applied=_row_applied(raw)))
+        links.append(JobLink(company=company, role=_one_line(raw.get("role", "")), url=url, applied=_row_applied(raw),
+                             priority=normalize_priority(raw.get("priority", ""))))
     sheet.notes.append(f"{len(links)} job link(s) found ({sum(link.applied for link in links)} marked applied). "
                        "They're attached to the contacts at the same company; nobody is imported from this sheet")
     return sheet, links
@@ -573,10 +575,15 @@ def analyse(filename: str, data: bytes, conn: sqlite3.Connection, check_domain: 
             if "job_url" in columns:       # 'Apply here' -> the address behind it
                 raw["job_url"] = _link_url(raw["job_url"], links.get((header_index + 1 + offset, columns["job_url"])))
             key = company_key(raw.get("company", ""))
-            if not raw.get("job_url"):     # a sheet of openings knows where to apply
-                match = pick_link(links_by_company.get(key, []), raw.get("role") or default_role)
-                if match:
-                    raw["job_url"] = match.url
+            company_links = links_by_company.get(key, [])
+            match = pick_link(company_links, raw.get("role") or default_role)
+            if match and not raw.get("job_url"):         # a sheet of openings knows where to apply
+                raw["job_url"] = match.url
+            if company_links and not normalize_priority(raw.get("priority", "")):
+                # its Fit: the matching opening's, else the company's best opening's
+                raw["priority"] = match.priority or min(
+                    (link.priority for link in company_links if link.priority),
+                    key=lambda p: ("high", "medium", "low").index(p), default="")
             if (sheet_applied or key in applied_by_link) and not _row_applied(raw):
                 raw["applied"] = "Yes"
             results.append(check_row(raw, row, check_domain, default_role, sheet.name))

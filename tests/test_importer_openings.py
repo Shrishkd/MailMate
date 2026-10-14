@@ -20,12 +20,12 @@ def workbook(*, openings_status=("Not applied", "Not applied", "Applied")) -> by
     openings.title = "Openings"
     openings.append(["New openings"])
     openings.append([])
-    openings.append(["#", "Company", "Role", "Direct apply link", "Status", "Applied on"])
-    for i, (company, role, url, status) in enumerate([
-            ("Nimbus Labs", "GenAI Engineer Intern", NIMBUS_JOB, openings_status[0]),
-            ("Nimbus Labs", "AI Chatbot Developer Intern", NIMBUS_CHAT, openings_status[1]),
-            ("Quillstack", "AI Engineer", QUILL_JOB, openings_status[2])], 1):
-        openings.append([i, company, role, "Apply here", status, None])
+    openings.append(["#", "Company", "Role", "Direct apply link", "Status", "Applied on", "Fit"])
+    for i, (company, role, url, status, fit) in enumerate([
+            ("Nimbus Labs", "GenAI Engineer Intern", NIMBUS_JOB, openings_status[0], "Low"),
+            ("Nimbus Labs", "AI Chatbot Developer Intern", NIMBUS_CHAT, openings_status[1], "High"),
+            ("Quillstack", "AI Engineer", QUILL_JOB, openings_status[2], "Medium")], 1):
+        openings.append([i, company, role, "Apply here", status, None, fit])
         openings.cell(row=3 + i, column=4).hyperlink = url            # the text says 'Apply here'
     openings.append([None, "A note below the table", None, None, None, None])
 
@@ -154,7 +154,7 @@ def test_the_roles_come_from_the_sheet_not_from_the_default(conn, fake_dns):
 def test_existing_contacts_get_the_link_from_the_openings_sheet(conn, fake_dns):
     db.add_contacts(conn, [Contact(company="Quillstack", role="AI Engineer", email="neha@quillstack.io")], "old.csv")
     r = report(conn, fake_dns)
-    assert {"email": "neha@quillstack.io", "job_url": QUILL_JOB, "priority": ""} in r.known_updates
+    assert {"email": "neha@quillstack.io", "job_url": QUILL_JOB, "priority": "medium"} in r.known_updates   # its Fit
     assert db.fill_contact_blanks(conn, r.known_updates, "tracker.xlsx") == 1
     assert conn.execute("SELECT job_url FROM contacts WHERE email = 'neha@quillstack.io'").fetchone()[0] == QUILL_JOB
 
@@ -169,3 +169,18 @@ def test_sheet_names_that_say_applied(name):
 def test_sheet_names_that_do_not(name):
     from mailmate.importer import _sheet_says_applied
     assert not _sheet_says_applied(name)
+
+
+def test_fit_on_an_opening_is_the_contacts_priority(conn, fake_dns):
+    got = contacts(report(conn, fake_dns))
+    assert got["priya@nimbuslabs.ai"].priority == "high"       # her opening (chatbot) is a High fit
+    assert got["ravi@nimbuslabs.ai"].priority == "low"         # his opening (GenAI) is a Low fit
+    assert got["neha@quillstack.io"].priority == "medium"
+    assert got["anita@quillstack.io"].priority == ""           # no opening listed for Zephyr Works
+
+
+def test_a_priority_in_the_contact_sheet_wins_over_fit(conn, fake_dns):
+    from tests.test_importer import csv_bytes
+    r = analyse("jobs.csv", csv_bytes(["Company", "Email", "Priority"], ["Quillstack", "neha@quillstack.io", "Low"]),
+                conn, fake_dns, default_role="AI Engineer")
+    assert r.valid[0].contact.priority == "low"

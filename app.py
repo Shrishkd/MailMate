@@ -20,7 +20,7 @@ from mailmate.review import ReviewError
 from mailmate.sending import SendError
 from mailmate.sentence_check import PersonalLine, is_job_ad, personalize_checked
 from mailmate.sync import apply_sync
-from mailmate.templates import (FIELDS, FOLLOW_UP_TEMPLATE, Template, check_template, latest_templates, merge,
+from mailmate.templates import (APPLIED_TEMPLATE, FIELDS, FOLLOW_UP_TEMPLATE, Template, check_template, latest_templates, merge,
                                 save_template, values_for)
 
 st.set_page_config(page_title="MailMate", page_icon="✉️", layout="wide")
@@ -193,11 +193,11 @@ def page_contacts():
     else:
         st.caption("Times are India time (DD/MM/YYYY T HH:MM:SS). 'Drafted at' = when the first email was drafted.")
         st.dataframe(pd.DataFrame([{
-            "Company": r["company"], "Role": r["role"], "Email": r["email"], "Job link": r["job_url"] or None,
-            "Name": r["name"], "Title": r["title"], "Priority": (r["priority"] or "").title(),
+            "Sl. No.": n, "Company": r["company"], "Role": r["role"], "Email": r["email"],
+            "Job link": r["job_url"] or None, "Name": r["name"], "Priority": (r["priority"] or "").title(),
             "Applied": companies.company_key(r["company"]) in applied, "Status": r["status"],
-            "Added": _ist(r["created_at"]), "Drafted at": _ist(r["drafted_at"]), "Source file": r["source_file"],
-        } for r in rows]), hide_index=True, width="stretch", column_config={
+            "Drafted at": _ist(r["drafted_at"]), "Added": _ist(r["created_at"]), "Source file": r["source_file"],
+        } for n, r in enumerate(rows, 1)]), hide_index=True, width="stretch", column_config={
             "Job link": st.column_config.LinkColumn("Job link", display_text="Open job"),
             "Applied": st.column_config.CheckboxColumn("Applied", help="Applied via the direct job link"),
         })
@@ -209,18 +209,21 @@ def page_contacts():
     if items:
         table = pd.DataFrame([{"Applied": i["applied"], "Company": i["company"],
                                "Job link": i["links"][0] if i["links"] else None,
-                               "Other links": len(i["links"]) - 1 if i["links"] else 0,
-                               "Applied at": _ist(i["applied_at"])} for i in items])
-        edited = st.data_editor(table, hide_index=True, width="stretch", key="applied_checklist",
-                                disabled=["Company", "Job link", "Other links", "Applied at"],
+                               "Drafted at": _ist(i["drafted_at"]), "Applied at": _ist(i["applied_at"])}
+                              for i in items])
+        # The editor remembers ticks by row position; a fresh key after each save drops stale ticks.
+        version = st.session_state.setdefault("checklist_version", 0)
+        edited = st.data_editor(table, hide_index=True, width="stretch", key=f"applied_checklist_{version}",
+                                disabled=["Company", "Job link", "Drafted at", "Applied at"],
                                 column_config={"Applied": st.column_config.CheckboxColumn("Applied"),
                                                "Job link": st.column_config.LinkColumn("Job link", display_text="Open job")})
-        changes = [(i["company"], bool(new)) for i, new in zip(items, edited["Applied"]) if bool(new) != i["applied"]]
-        st.caption(f"{sum(i['applied'] for i in items)} of {len(items)} companies ticked."
-                   + (f" {len(changes)} unsaved change(s)." if changes else ""))
+        ticked = dict(zip(edited["Company"], edited["Applied"]))
+        changes = [i["company"] for i in items if bool(ticked.get(i["company"], i["applied"])) != i["applied"]]
+        st.caption(f"{sum(i['applied'] for i in items)} of {len(items)} companies ticked (saved)."
+                   + (f" {len(changes)} unsaved change(s): {', '.join(changes)}." if changes else ""))
         if st.button("Save checklist", disabled=not changes):
-            for company, value in changes:
-                companies.set_applied(conn, company, value)
+            companies.save_checklist(conn, ticked)
+            st.session_state.checklist_version = version + 1
             st.rerun()
     st.subheader("Do-not-contact list")
     blocked = pd.read_sql_query("SELECT email, reason, note, created_at FROM suppression ORDER BY created_at DESC", conn)
@@ -372,7 +375,7 @@ def _draft_emails(contacts, template: Template, my_name: str) -> None:
                 problems.append(f"{contact['email']}: W1 failed ({exc}); drafted without a personal line")
                 line = PersonalLine()
             try:
-                review.create_draft(conn, contact["id"], template, line)
+                review.create_draft(conn, contact["id"], review.template_for(conn, contact, template), line)
                 made += 1
             except ReviewError as exc:
                 problems.append(str(exc))
@@ -543,8 +546,11 @@ def page_review():
             for problem in problems:
                 st.warning(problem)
         if candidates:
-            by_name = {f"{t.name} (v{t.version})": t for t in templates if t.name != FOLLOW_UP_TEMPLATE}
+            by_name = {f"{t.name} (v{t.version})": t for t in templates
+                       if t.name not in (FOLLOW_UP_TEMPLATE, APPLIED_TEMPLATE)}
             template = by_name[st.selectbox("Template", list(by_name))]
+            st.caption(f"Contacts at companies you applied to by direct link get the '{APPLIED_TEMPLATE}' template "
+                       "automatically (created from this one the first time; edit it on the Templates page).")
             options = {c["id"]: c for c in candidates}
             now = datetime.now(timezone.utc)
             suggested = selection.suggest_drafts(conn, candidates, now, test_to, limit=DRAFT_SUGGESTION)

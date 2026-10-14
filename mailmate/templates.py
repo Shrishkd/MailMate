@@ -25,6 +25,14 @@ OPT_OUT_LINE = "If this isn't relevant, just let me know and I won't follow up."
 # subject is never used: the follow-up's subject is "Re: <first subject>".
 FOLLOW_UP_TEMPLATE = "Follow-up"
 
+# The first email for a company I already applied to by direct link (used automatically, see
+# review.template_for). Created from my usual template the first time, then edited like any other.
+APPLIED_TEMPLATE = "Applied outreach"
+_SEEN_NEWS = re.compile(r"I recently came across the news that \{company\} is hiring for the \{role\} role"
+                        r"(?P<middle>.*?)I couldn[’']t just scroll past\.", re.S)
+APPLIED_OPENING = "I recently applied for the {role} role at {company} through your careers page"
+APPLIED_CLOSING = "I wanted to reach out to you directly as well."
+
 _FIELD = re.compile(r"\{([^{}\n]*)\}")
 # A field plus the space before it, so an empty value doesn't leave "Hey ," behind.
 _FIELD_WITH_SPACE = re.compile(r"(?P<space>[ \t]?)\{(?P<name>[a-z_]+)\}")
@@ -174,6 +182,28 @@ def values_for(contact, settings: dict[str, str], personal_line: str = "") -> di
 # --- storage ------------------------------------------------------------------------------
 # Templates are never edited in place: saving a change adds a new version, so every sent
 # email points at the exact text it came from and reply rates can be compared per version.
+
+def applied_variant(base: Template) -> tuple[str, str]:
+    """(subject, body) of `base` reworded for a company I already applied to: 'I recently applied for
+    the {role} role at {company} through your careers page...' instead of 'came across the news'."""
+    body = base.body
+    seen = _SEEN_NEWS.search(body)
+    if seen:
+        body = (body[:seen.start()] + APPLIED_OPENING + seen["middle"] + APPLIED_CLOSING + body[seen.end():])
+    else:                                     # a template worded differently: add the sentence after the greeting
+        greeting, _, rest = body.partition("\n")
+        body = f"{greeting}\n\n{APPLIED_OPENING} and {APPLIED_CLOSING[2:]}\n{rest}"
+    return base.subject, body
+
+
+def ensure_applied_template(conn: sqlite3.Connection, base: Template) -> Template:
+    """The newest 'Applied outreach' template; the first time, created from `base`."""
+    for t in latest_templates(conn):
+        if t.name == APPLIED_TEMPLATE:
+            return t
+    subject, body = applied_variant(base)
+    return save_template(conn, APPLIED_TEMPLATE, subject, body)
+
 
 def latest_templates(conn: sqlite3.Connection) -> list[Template]:
     rows = conn.execute(

@@ -23,7 +23,8 @@ from mailmate import db
 from mailmate.companies import applied_keys, company_key
 from mailmate.n8n import Source
 from mailmate.sentence_check import PersonalLine, check_sentence
-from mailmate.templates import FOLLOW_UP_TEMPLATE, OPT_OUT_LINE, Template, latest_templates, merge, values_for
+from mailmate.templates import (APPLIED_TEMPLATE, FOLLOW_UP_TEMPLATE, OPT_OUT_LINE, Template,
+                                ensure_applied_template, latest_templates, merge, values_for)
 
 INDIVIDUAL_BATCHES = 2      # real batches that must be approved one email at a time
 SAMPLES_BEFORE_BULK = 5     # drafts I must look at before "approve all" unlocks
@@ -91,6 +92,14 @@ def contacts_to_draft(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         " ORDER BY CASE c.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, c.id"
         ).fetchall()
     return sorted(rows, key=lambda c: company_key(c["company"]) not in applied)   # stable: keeps the rest
+
+
+def template_for(conn: sqlite3.Connection, contact, chosen: Template) -> Template:
+    """The template a contact's first email uses: 'Applied outreach' at a company I applied to by direct
+    link (created from `chosen` the first time), otherwise `chosen`."""
+    if chosen.name != FOLLOW_UP_TEMPLATE and company_key(contact["company"]) in applied_keys(conn):
+        return ensure_applied_template(conn, chosen)
+    return chosen
 
 
 def create_draft(conn: sqlite3.Connection, contact_id: int, template: Template, line: PersonalLine) -> int:

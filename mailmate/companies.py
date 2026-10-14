@@ -36,13 +36,31 @@ def set_applied(conn: sqlite3.Connection, company: str, applied: bool, source: s
 
 
 def checklist(conn: sqlite3.Connection) -> list[dict]:
-    """Every company among my contacts (one row each) with its applied state and job links."""
+    """Every company among my contacts (one row each): applied state, job links, and when its first
+    email was drafted. Always in the same (alphabetical) order, so ticking never moves rows."""
     applied = {r["company_key"]: r for r in conn.execute("SELECT * FROM applied_companies")}
     rows: dict[str, dict] = {}
-    for c in conn.execute("SELECT company, job_url FROM contacts ORDER BY id"):
+    for c in conn.execute(
+            "SELECT c.company, c.job_url, (SELECT MIN(e.created_at) FROM emails e WHERE e.contact_id = c.id"
+            " AND e.kind = 'initial' AND e.status != 'rejected') AS drafted_at FROM contacts c ORDER BY c.id"):
         key = company_key(c["company"])
         row = rows.setdefault(key, {"key": key, "company": c["company"], "links": [], "applied": key in applied,
-                                    "applied_at": applied[key]["applied_at"] if key in applied else None})
+                                    "applied_at": applied[key]["applied_at"] if key in applied else None,
+                                    "drafted_at": None})
         if c["job_url"] and c["job_url"] not in row["links"]:
             row["links"].append(c["job_url"])
-    return sorted(rows.values(), key=lambda r: (not r["applied"], r["company"].lower()))
+        if c["drafted_at"] and (row["drafted_at"] is None or c["drafted_at"] < row["drafted_at"]):
+            row["drafted_at"] = c["drafted_at"]
+    return sorted(rows.values(), key=lambda r: r["company"].lower())
+
+
+def save_checklist(conn: sqlite3.Connection, ticked: dict[str, bool]) -> list[str]:
+    """{company: ticked} as shown on screen -> store only real changes. Matched by company name, never
+    by row position. Returns the companies that changed."""
+    current = applied_keys(conn)
+    changed = []
+    for company, value in ticked.items():
+        if bool(value) != (company_key(company) in current):
+            set_applied(conn, company, bool(value))
+            changed.append(company)
+    return changed
