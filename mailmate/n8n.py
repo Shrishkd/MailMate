@@ -22,6 +22,9 @@ RETRY_DELAYS = (3, 10, 20)             # seconds before the 2nd, 3rd and 4th try
 _RETRY_STATUS = {429, 502, 503, 504}
 # W1 does a web search and an LLM call; 20-40 s is normal, so allow plenty before giving up.
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
+# W3 reads every labelled thread; from a home connection that can take minutes. Asking again while
+# it's still working only starts a second run, so give it time.
+SYNC_TIMEOUT = httpx.Timeout(600.0, connect=15.0)
 
 
 class N8nError(RuntimeError):
@@ -69,7 +72,7 @@ class N8nClient:
         return text.replace(self._settings.token, "***") if self._settings.token else text
 
     def _post(self, path: str, *, json_body: dict | None = None, data: dict | None = None,
-              files: dict | None = None, repeatable: bool = True) -> dict:
+              files: dict | None = None, repeatable: bool = True, timeout: httpx.Timeout | None = None) -> dict:
         """POST to a webhook. `repeatable=False` is for calls with side effects (sending email):
         those are retried only when the request certainly never left this laptop, because a
         lost answer could otherwise turn into a second send."""
@@ -80,7 +83,8 @@ class N8nClient:
                 self._sleep(self._retry_delays[attempt - 1])
             try:
                 response = self._http.post(url, json=json_body, data=data, files=files,
-                                           headers={TOKEN_HEADER: self._settings.token})
+                                           headers={TOKEN_HEADER: self._settings.token},
+                                           timeout=timeout or TIMEOUT)
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:   # never reached n8n
                 last_problem = f"network error ({type(exc).__name__})"
                 continue
@@ -135,7 +139,7 @@ class N8nClient:
     def sync(self, since_days: int = 30) -> "SyncResult":
         """W3: my MailMate-labelled Gmail threads from the last `since_days` days, replies sorted.
         Read-only on both ends, so it is safe to retry."""
-        data = self._post("MailMate-sync", json_body={"since_days": since_days})
+        data = self._post("MailMate-sync", json_body={"since_days": since_days}, timeout=SYNC_TIMEOUT)
         if isinstance(data, list) and len(data) == 1:
             data = data[0]
         try:

@@ -42,18 +42,24 @@
     },
     {
       "parameters": {
-        "resource": "thread",
-        "operation": "get",
-        "threadId": "={{ $json.id }}",
-        "simple": true,
+        "method": "GET",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/threads/{{ $json.id }}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
         "options": {
-          "returnOnlyMessages": false
+          "batching": {
+            "batch": {
+              "batchSize": 10,
+              "batchInterval": 0
+            }
+          },
+          "timeout": 30000
         }
       },
       "id": "7e2d4b63-2a1f-4d9e-8b62-1c8f3d2e0b03",
       "name": "Get thread",
-      "type": "n8n-nodes-base.gmail",
-      "typeVersion": 2.1,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         440,
         300

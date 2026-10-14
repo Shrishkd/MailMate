@@ -54,12 +54,17 @@ def main(argv: list[str]) -> int:
         try:
             client.send_batch(payload, FAKE_PDF, "guard.pdf")
         except N8nError as exc:
-            print(f"[OK]   refused: {label}\n       ({str(exc)[:140]})")
+            if "refused the webhook token" in str(exc) or "not found (404)" in str(exc):
+                failures += 1          # stopped at the door: the guard itself was never tested
+                print(f"[FAIL] not tested: {label}\n       ({str(exc)[:160]})")
+            else:
+                print(f"[OK]   refused: {label}\n       ({str(exc)[:140]})")
         else:
             failures += 1
             print(f"[FAIL] ACCEPTED: {label}. Deactivate W2 now and check the guard node!")
     client.close()
-    print("\nAll refused, as they should be." if not failures else f"\n{failures} batch(es) were accepted!")
+    print("\nAll refused by the guard, as they should be." if not failures
+          else f"\n{failures} check(s) failed: fix the setup problem above and run this again.")
     return 1 if failures else 0
 
 
