@@ -257,3 +257,13 @@ def test_a_self_test_batch_doesnt_unlock_approve_all(conn, setup):
     assert not allowed and "(0 sent so far)" in why
     send(conn, recruiters(setup, 1))
     assert "(1 sent so far)" in review.bulk_approval_status(conn, reviewed=10, test_to=TEST_TO)[1]
+
+
+# --- sent but not yet confirmed by a sync ------------------------------------------------------
+
+def test_emails_waiting_for_a_sync_are_reported_once_their_batch_is_done(conn, setup):
+    batch = send(conn, recruiters(setup, 2))
+    assert sending.unconfirmed(conn, MONDAY_10 + timedelta(minutes=1)) == (0, [])      # still sending
+    assert sending.unconfirmed(conn, MONDAY_10 + timedelta(hours=1)) == (2, [batch.batch_id])
+    conn.execute("UPDATE emails SET status = 'sent'")                                    # a sync confirmed them
+    assert sending.unconfirmed(conn, MONDAY_10 + timedelta(hours=1)) == (0, [])

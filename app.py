@@ -20,8 +20,8 @@ from mailmate.review import ReviewError
 from mailmate.sending import SendError
 from mailmate.sentence_check import PersonalLine, is_job_ad, personalize_checked
 from mailmate.sync import apply_sync
-from mailmate.templates import (APPLIED_TEMPLATE, FIELDS, FOLLOW_UP_TEMPLATE, Template, check_template, latest_templates, merge,
-                                save_template, values_for)
+from mailmate.templates import (APPLIED_TEMPLATE, FIELDS, FOLLOW_UP_TEMPLATE, Template, check_template,
+                                ensure_applied_template, latest_templates, merge, save_template, values_for)
 
 st.set_page_config(page_title="MailMate", page_icon="✉️", layout="wide")
 conn = db.connect(DB_PATH)
@@ -175,6 +175,13 @@ def _update_existing(report: ImportReport) -> None:
                    "added to the applied checklist.")
 
 
+def _contact_status(row) -> str:
+    """'drafted' says too little: show where the contact's first email actually is."""
+    if row["status"] != "drafted":
+        return row["status"]
+    return {"approved": "approved (not sent)", "queued": "queued (sync to confirm)"}.get(row["email_status"], "drafted")
+
+
 def _ist(timestamp: str | None) -> str:
     """Stored UTC timestamp -> India time as DD/MM/YYYY T HH:MM:SS."""
     if not timestamp:
@@ -182,12 +189,34 @@ def _ist(timestamp: str | None) -> str:
     return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(sending.IST).strftime("%d/%m/%Y T %H:%M:%S")
 
 
+def _sync_reminder() -> None:
+    """Sent emails count as sent only once a reply sync finds them in Gmail; say so when one is due."""
+    count, batches = sending.unconfirmed(conn, datetime.now(timezone.utc))
+    if count:
+        st.warning(f"{count} email(s) from batch {', '.join(f'#{b}' for b in batches)} went out but aren't "
+                   "confirmed yet: open **Replies → Sync replies now**. Until then they show as 'queued (sync to "
+                   "confirm)' and don't count on the Dashboard.")
+
+
+def _ensure_applied_template() -> None:
+    """Create 'Applied outreach' as soon as a company is ticked as applied, from my usual template, so
+    it can be read, edited and tested before the first draft needs it."""
+    if not companies.applied_keys(conn):
+        return
+    usual = [t for t in latest_templates(conn) if t.name not in (FOLLOW_UP_TEMPLATE, APPLIED_TEMPLATE)]
+    if usual:
+        ensure_applied_template(conn, usual[0])
+
+
 def page_contacts():
     st.title("Contacts")
+    _sync_reminder()
     applied = companies.applied_keys(conn)
     rows = conn.execute(
         "SELECT c.*, (SELECT MIN(e.created_at) FROM emails e WHERE e.contact_id = c.id AND e.kind = 'initial'"
-        " AND e.status != 'rejected') AS drafted_at FROM contacts c ORDER BY c.id DESC").fetchall()
+        " AND e.status != 'rejected') AS drafted_at, (SELECT e.status FROM emails e WHERE e.contact_id = c.id"
+        " AND e.kind = 'initial' AND e.status != 'rejected' ORDER BY e.id DESC LIMIT 1) AS email_status"
+        " FROM contacts c ORDER BY c.id DESC").fetchall()
     if not rows:
         st.info("No contacts yet. Upload a job list first.")
     else:
@@ -195,7 +224,7 @@ def page_contacts():
         st.dataframe(pd.DataFrame([{
             "Sl. No.": n, "Company": r["company"], "Role": r["role"], "Email": r["email"],
             "Job link": r["job_url"] or None, "Name": r["name"], "Priority": (r["priority"] or "").title(),
-            "Applied": companies.company_key(r["company"]) in applied, "Status": r["status"],
+            "Applied": companies.company_key(r["company"]) in applied, "Status": _contact_status(r),
             "Drafted at": _ist(r["drafted_at"]), "Added": _ist(r["created_at"]), "Source file": r["source_file"],
         } for n, r in enumerate(rows, 1)]), hide_index=True, width="stretch", column_config={
             "Job link": st.column_config.LinkColumn("Job link", display_text="Open job"),
@@ -289,6 +318,7 @@ def _show_w1_result(label: str) -> None:
 def page_templates():
     st.title("Templates")
     settings = db.get_settings(conn)
+    _ensure_applied_template()
     with st.expander("Your details: {my_name} and {signature}", expanded=not settings.get("my_name")):
         with st.form("details"):
             my_name = st.text_input("Your name", settings.get("my_name", ""))
@@ -641,6 +671,7 @@ def page_review():
 
 def page_send():
     st.title("Send")
+    _sync_reminder()
     st.caption("Step 6: test emails to your own secondary inbox only. Real sending to recruiters comes in Step 7.")
     try:
         test_to = test_address()
@@ -950,6 +981,7 @@ def _sends_chart(days: list, colors: dict[str, str]) -> alt.Chart:
 
 def page_dashboard():
     st.title("Dashboard")
+    _sync_reminder()
     try:
         test_to = test_address()
     except ConfigError as exc:

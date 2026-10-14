@@ -356,6 +356,17 @@ def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetim
     return plan
 
 
+def unconfirmed(conn: sqlite3.Connection, now: datetime) -> tuple[int, list[int]]:
+    """(emails, batch ids) that W2 should have sent by now but no reply sync has confirmed yet."""
+    rules = send_rules(conn)
+    running = running_batch(conn, now, rules)
+    rows = conn.execute("SELECT e.batch_id FROM emails e JOIN batches b ON b.id = e.batch_id"
+                        " WHERE e.status = 'queued' AND e.test_mode = 0 AND b.status IN ('submitted', 'stopped')"
+                        ).fetchall()
+    batches = sorted({r[0] for r in rows if not running or r[0] != running[0]})
+    return sum(1 for r in rows if r[0] in batches), batches
+
+
 def capacity_now(conn: sqlite3.Connection, now: datetime) -> tuple[int, str]:
     """(how many real emails may go in a batch right now, why not more). Self-tests aside."""
     rules = send_rules(conn)
