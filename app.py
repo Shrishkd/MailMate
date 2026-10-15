@@ -807,6 +807,11 @@ def _real_sending(test_to: str, settings: dict[str, str]) -> None:
     c3.metric("Running batch", f"#{running[0]} until ~{running[1].astimezone(sending.IST):%H:%M}" if running else "none")
 
     candidates = sending.sendable_emails(conn)
+    for version, count in sending.waiting_for_a_test(conn):
+        st.warning(f"**{count} approved email(s) use {version}, which has no checked test yet**, so they can't be "
+                   f"sent for real (rule 2). In **2. Test email** above, pick one of them and send it to your test "
+                   f"inbox; check it, then in **3. Check what arrived** mark {version} as test-checked. They'll "
+                   "appear here.")
     if not RESUME_PATH.exists():
         st.info("Upload your resume first (step 1).")
     elif not candidates:

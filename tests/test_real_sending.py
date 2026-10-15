@@ -267,3 +267,10 @@ def test_emails_waiting_for_a_sync_are_reported_once_their_batch_is_done(conn, s
     assert sending.unconfirmed(conn, MONDAY_10 + timedelta(hours=1)) == (2, [batch.batch_id])
     conn.execute("UPDATE emails SET status = 'sent'")                                    # a sync confirmed them
     assert sending.unconfirmed(conn, MONDAY_10 + timedelta(hours=1)) == (0, [])
+
+
+def test_emails_held_back_for_a_missing_test_are_named(conn, setup):
+    assert sending.waiting_for_a_test(conn) == []
+    conn.execute("UPDATE templates SET test_checked_at = NULL")
+    assert sending.waiting_for_a_test(conn) == [("cold v1", 7)]
+    assert sending.sendable_emails(conn) == []

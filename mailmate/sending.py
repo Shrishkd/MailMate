@@ -471,6 +471,13 @@ def real_batches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         " LEFT JOIN emails e ON e.batch_id = b.id WHERE b.test_mode = 0 GROUP BY b.id ORDER BY b.id DESC").fetchall()
 
 
+def waiting_for_a_test(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    """[(template version, approved emails)] held back because that version has no checked test (rule 2)."""
+    return [(r[0], r[1]) for r in conn.execute(
+        "SELECT t.name || ' v' || t.version, COUNT(*) FROM emails e JOIN templates t ON t.id = e.template_id"
+        " WHERE e.status = 'approved' AND t.test_checked_at IS NULL GROUP BY t.id ORDER BY t.name, t.version")]
+
+
 def sendable_emails(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Approved emails whose template version has a checked test."""
     return conn.execute(
