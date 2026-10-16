@@ -1,0 +1,354 @@
+{
+  "name": "MailMate W4 Reply draft",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "MailMate-reply",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b00",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b99"
+    },
+    {
+      "parameters": {
+        "jsCode": "// W4 writes an answer, or saves one as a Gmail DRAFT. It has no node that sends email.\nconst b = $json.body || {};\nconst action = String(b.action || '');\nconst NL = String.fromCharCode(10);\nif (action === 'draft') {\n  const text = String(b.text || '').trim();\n  const thread = String(b.thread_id || '').trim();\n  if (!/^[0-9a-f]+$/i.test(thread)) throw new Error('thread_id is missing or malformed');\n  if (!text) throw new Error('the answer is empty');\n  if (text.length > 6000) throw new Error('the answer is too long');\n  if (text.includes('[') && text.includes(']')) throw new Error('the answer still has [placeholders] to fill in');\n  return [{ json: { action, thread_id: thread, text } }];\n}\nif (action !== 'write') throw new Error('action must be write or draft');\nfor (const k of ['their_message', 'my_name']) if (!String(b[k] || '').trim()) throw new Error(k + ' is missing');\nconst system = [\n  'You draft short email replies for a job seeker, written as the job seeker, in the first person.',\n  'Rules:',\n  '- Answer exactly what the recruiter asked or proposed. Warm, professional, brief: 40 to 120 words.',\n  '- Never invent facts. Times, dates, availability, salary, notice period, links and numbers come only from the notes below. If the reply needs one that is not in the notes, write a short placeholder in square brackets instead, for example [two times that suit you].',\n  '- No subject line. Start with a greeting that uses their first name if it is known.',\n  '- End with \"Best regards,\" and the name of the job seeker on the next line. Nothing after that.',\n  '- Plain text only: no markdown, no bullet points unless they asked several questions.',\n].join(NL);\nconst user = [\n  'Recruiter: ' + (b.their_name || 'unknown') + ' at ' + (b.company || 'the company') + '.',\n  'Role the job seeker wrote about: ' + (b.role || 'not given') + '.',\n  'Job seeker: ' + b.my_name + '.',\n  '',\n  'Their email:',\n  String(b.their_message).slice(0, 4000),\n  '',\n  'The job seeker\\'s earlier email to them:',\n  String(b.my_email || '(not available)').slice(0, 3000),\n  '',\n  'Notes from the job seeker for this answer (facts that may be used): ' + (String(b.notes || '').trim() || 'none'),\n].join(NL);\nreturn [{ json: { action, model: 'gpt-oss:120b',\n                  messages: [{ role: 'system', content: system }, { role: 'user', content: user }] } }];\n"
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b01",
+      "name": "Check request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c0ffee00-0000-4000-8000-000000000440",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "write",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b02",
+      "name": "Write?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ollama.com/api/chat",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $json.model, stream: false, options: { temperature: 0.3 }, messages: $json.messages }) }}",
+        "options": {
+          "timeout": 90000
+        }
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b03",
+      "name": "LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $input.first().json;\nconst raw = String(r.message?.content || '').trim();\nif (!raw) return [{ json: { error: 'the model gave no answer ' + JSON.stringify(r.error || '').slice(0, 150) } }];\nconst NL = String.fromCharCode(10);\nconst text = raw.split(NL).filter(l => !l.trim().toLowerCase().startsWith('subject:')).join(NL).trim();\nreturn [{ json: { text, model: r.model || 'gpt-oss:120b' } }];\n"
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b04",
+      "name": "Shape answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/threads/{{ $json.thread_id }}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=From&metadataHeaders=Reply-To&metadataHeaders=Subject",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b05",
+      "name": "Get thread",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        440
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// The draft answers their last message in the same Gmail thread, addressed to whoever wrote it.\nconst req = $('Check request').first().json;\nconst thread = $input.first().json;\nif (thread.error || !thread.messages) {\n  return [{ json: { error: 'Gmail could not read the thread: ' + JSON.stringify(thread.error || thread).slice(0, 200) } }];\n}\nconst header = (m, name) => {\n  for (const h of (m.payload?.headers || [])) if (String(h.name).toLowerCase() === name) return String(h.value || '');\n  return '';\n};\nconst addr = s => {\n  const t = String(s || '');\n  const o = t.indexOf('<'), c = t.indexOf('>');\n  return (o >= 0 && c > o ? t.slice(o + 1, c) : t).trim();\n};\nconst msgs = thread.messages;\nconst theirs = msgs.filter(m => !(m.labelIds || []).includes('SENT'));\nif (!theirs.length) return [{ json: { error: 'there is no message from them in this thread' } }];\nconst last = theirs[theirs.length - 1];\nconst to = addr(header(last, 'reply-to') || header(last, 'from'));\nconst messageId = header(last, 'message-id');\nlet subject = header(last, 'subject') || header(msgs[0], 'subject');\nif (!subject.toLowerCase().startsWith('re:')) subject = 'Re: ' + subject;\nconst CR = String.fromCharCode(13), NL = String.fromCharCode(10), CRLF = CR + NL;\nconst b64 = s => Buffer.from(s, 'utf8').toString('base64');\nconst word = s => '=?UTF-8?B?' + b64(s) + '?=';\nconst wrap = s => { const out = []; for (let i = 0; i < s.length; i += 76) out.push(s.slice(i, i + 76)); return out.join(CRLF); };\nconst body = req.text.split(CR).join('').split(NL).join(CRLF);\nconst lines = ['To: ' + to, 'Subject: ' + word(subject)];\nif (messageId) lines.push('In-Reply-To: ' + messageId, 'References: ' + messageId);\nconst mime = lines.concat(['MIME-Version: 1.0', 'Content-Type: text/plain; charset=UTF-8',\n                           'Content-Transfer-Encoding: base64', '', wrap(b64(body))]).join(CRLF);\nconst raw = b64(mime).split('+').join('-').split('/').join('_').replace(/=+$/, '');\nreturn [{ json: { raw, threadId: thread.id, to } }];\n"
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b06",
+      "name": "Build draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c0ffee00-0000-4000-8000-000000001100",
+              "leftValue": "={{ $json.raw }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b07",
+      "name": "Draft ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: { raw: $json.raw, threadId: $json.threadId } }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b08",
+      "name": "Create draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        380
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $input.first().json;\nif (r.error || !r.id) {\n  return [{ json: { error: 'Gmail did not save the draft: ' + JSON.stringify(r.error || r).slice(0, 200) } }];\n}\nreturn [{ json: { draft_id: r.id, to: $('Build draft').first().json.to } }];\n"
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b09",
+      "name": "Draft result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "8f3e5c74-3b2a-4e0f-9c73-2d9f4e3f0b10",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Check request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check request": {
+      "main": [
+        [
+          {
+            "node": "Write?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write?": {
+      "main": [
+        [
+          {
+            "node": "LLM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get thread",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM": {
+      "main": [
+        [
+          {
+            "node": "Shape answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape answer": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get thread": {
+      "main": [
+        [
+          {
+            "node": "Build draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build draft": {
+      "main": [
+        [
+          {
+            "node": "Draft ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft ready?": {
+      "main": [
+        [
+          {
+            "node": "Create draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create draft": {
+      "main": [
+        [
+          {
+            "node": "Draft result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft result": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

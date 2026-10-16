@@ -211,7 +211,7 @@ def test_an_unclear_failure_keeps_the_emails_queued_until_checked(conn, setup):
 
 def test_a_submitted_batch_cant_be_released(conn, setup):
     batch = send(conn, recruiters(setup, 1))
-    with pytest.raises(SendError, match="only a failed real batch"):
+    with pytest.raises(SendError, match="only a failed batch"):
         sending.release_batch(conn, batch.batch_id, nothing_sent_confirmed=True)
 
 

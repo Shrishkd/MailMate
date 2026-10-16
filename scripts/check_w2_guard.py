@@ -8,6 +8,7 @@ email you. If any batch is accepted, deactivate W2 and fix the guard before send
 """
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -46,6 +47,9 @@ def main(argv: list[str]) -> int:
         ("batch larger than 20", {"test_mode": True, "emails": [email(test_to, i) for i in range(21)]}),
         ("test-mode follow-up to an address other than the test inbox",
          {"test_mode": True, "emails": [{**email(own), "reply_to_message_id": "abc"}]}),
+        ("real batch scheduled more than 4 days ahead (a complete email, so only the start can refuse it)",
+         {"test_mode": False, "scheduled_emails": [email(own)],
+          "start_at": (datetime.now(timezone.utc) + timedelta(days=6)).isoformat()}),
     ]
     client = N8nClient(settings, retry_delays=())
     failures = 0

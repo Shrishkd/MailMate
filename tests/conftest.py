@@ -1,4 +1,6 @@
+import _socket
 import socket
+import sys
 
 import pytest
 
@@ -20,7 +22,14 @@ def no_network(monkeypatch):
     """Rule 9: no test may reach a real webhook, Gmail, DNS or model. Any attempt fails loudly."""
     def refuse(*args, **kwargs):
         raise RuntimeError("tests must not use the network; use a fake (httpx.MockTransport, fake_dns)")
-    monkeypatch.setattr(socket.socket, "connect", refuse)
+
+    def connect(sock, address):
+        # One exception: on Windows, asyncio's event loop (which Streamlit's AppTest runs) wires itself up
+        # with socket.socketpair(), a socket talking to itself on 127.0.0.1. Nothing else gets through.
+        if sys._getframe(1).f_code.co_name == "socketpair" and address[0] in ("127.0.0.1", "::1"):
+            return _socket.socket.connect(sock, address)
+        refuse()
+    monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket, "getaddrinfo", refuse)
     monkeypatch.setattr(socket, "create_connection", refuse)
 

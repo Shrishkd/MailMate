@@ -130,9 +130,10 @@ class N8nClient:
         except ValidationError as exc:
             raise N8nError(f"W2 answered in an unexpected shape: {exc.errors()[0]['msg']}; it got past its checks, "
                            "so it may be sending: check n8n -> Executions", maybe_sent=True) from None
-        if accepted.batch_id != payload["batch_id"] or accepted.accepted != len(payload["emails"]):
+        emails = payload.get("emails") or payload.get("scheduled_emails") or []
+        if accepted.batch_id != payload["batch_id"] or accepted.accepted != len(emails):
             raise N8nError(f"W2 accepted {accepted.accepted} email(s) of batch {accepted.batch_id}, but MailMate "
-                           f"sent {len(payload['emails'])} of batch {payload['batch_id']}; check n8n -> Executions",
+                           f"sent {len(emails)} of batch {payload['batch_id']}; check n8n -> Executions",
                            maybe_sent=True)
         return accepted
 
@@ -167,6 +168,47 @@ class N8nClient:
         if len(known) != len(result.sources):
             raise N8nError("W1 returned two sources with the same id")
         return result
+
+    def _reply(self, payload: dict, repeatable: bool) -> dict:
+        data = self._post("MailMate-reply", json_body=payload, repeatable=repeatable)
+        if isinstance(data, list) and len(data) == 1:
+            data = data[0]
+        if not isinstance(data, dict):
+            raise N8nError("W4 answered in an unexpected shape")
+        if data.get("error"):
+            raise N8nError(f"W4: {self._redact(str(data['error']))[:300]}")
+        return data
+
+    def write_reply(self, request: dict) -> "ReplyText":
+        """W4 suggests an answer to a recruiter's email. Text only: nothing is saved or sent."""
+        try:
+            return ReplyText.model_validate(self._reply({"action": "write", **request}, repeatable=True))
+        except ValidationError as exc:
+            raise N8nError(f"W4 answered in an unexpected shape: {exc.errors()[0]['msg']}") from None
+
+    def save_reply_draft(self, thread_id: str, text: str) -> "ReplyDraft":
+        """W4 saves my answer as a Gmail DRAFT in that thread. It never sends: I send it from Gmail."""
+        try:
+            data = self._reply({"action": "draft", "thread_id": thread_id, "text": text}, repeatable=False)
+        except N8nError as exc:
+            if exc.maybe_sent:
+                raise N8nError(f"{exc} (Here that means: look in Gmail → Drafts before saving again, so you don't "
+                               "end up with two drafts.)") from None
+            raise
+        try:
+            return ReplyDraft.model_validate(data)
+        except ValidationError as exc:
+            raise N8nError(f"W4 answered in an unexpected shape: {exc.errors()[0]['msg']}") from None
+
+
+class ReplyText(BaseModel):
+    text: str
+    model: str = ""
+
+
+class ReplyDraft(BaseModel):
+    draft_id: str
+    to: str = ""
 
 
 # Gmail's reply text starts with the reply and then quotes my email ("On Sat, Oct 10, 2026 ... wrote:").

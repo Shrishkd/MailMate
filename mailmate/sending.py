@@ -218,6 +218,8 @@ def mark_test_checked(conn: sqlite3.Connection, template_id: int) -> None:
 IST = timezone(timedelta(hours=5, minutes=30))   # no daylight saving, so a fixed offset is exact
 MAX_BATCH = 20                                   # W2 refuses more, whatever the cap says
 RUN_MARGIN_S = 300                               # a batch counts as running a bit past its last send
+MAX_SCHEDULE_AHEAD = timedelta(days=4)           # Friday evening for Monday morning, not further (W2 checks too)
+LATE_START = timedelta(minutes=30)               # W2 won't start a scheduled batch later than this (n8n was off)
 DEFAULT_RULES = {"daily_cap": 20, "spacing_min_s": 180, "spacing_max_s": 420,
                  "window_start": "09:30", "window_end": "18:00"}
 
@@ -254,22 +256,72 @@ def save_send_rules(conn: sqlite3.Connection, rules: SendRules) -> None:
 
 
 def queued_today(conn: sqlite3.Connection, now: datetime) -> int:
-    """Real emails handed to W2 on today's date in India. Released emails don't count."""
+    """Real emails going out on `now`'s date in India: handed to W2 that day, or scheduled for it.
+    Released emails don't count."""
     today = now.astimezone(IST).date()
     rows = conn.execute("SELECT queued_at FROM emails WHERE test_mode = 0 AND queued_at IS NOT NULL")
     return sum(datetime.fromisoformat(r[0]).astimezone(IST).date() == today for r in rows)
 
 
-def running_batch(conn: sqlite3.Connection, now: datetime, rules: SendRules) -> tuple[int, datetime] | None:
-    """(batch id, when it should be done) for a real batch that may still be sending."""
-    for b in conn.execute("SELECT b.id, b.submitted_at, COUNT(e.id) AS n FROM batches b"
+def _start(batch) -> datetime:
+    return datetime.fromisoformat(batch["scheduled_for"] or batch["submitted_at"])
+
+
+def _pending(conn: sqlite3.Connection, now: datetime, rules: SendRules) -> list[tuple[int, datetime, datetime]]:
+    """[(batch id, start, done by)] for real batches that are sending or scheduled, soonest first."""
+    out = []
+    for b in conn.execute("SELECT b.id, b.submitted_at, b.scheduled_for, COUNT(e.id) AS n FROM batches b"
                           " JOIN emails e ON e.batch_id = b.id WHERE b.test_mode = 0 AND b.status = 'submitted'"
-                          " GROUP BY b.id ORDER BY b.id DESC"):
-        done_by = (datetime.fromisoformat(b["submitted_at"])
-                   + timedelta(seconds=(b["n"] - 1) * rules.spacing_max_s + RUN_MARGIN_S))
+                          " GROUP BY b.id"):
+        start = _start(b)
+        done_by = start + timedelta(seconds=(b["n"] - 1) * rules.spacing_max_s + RUN_MARGIN_S)
         if done_by > now:
-            return b["id"], done_by
+            out.append((b["id"], start, done_by))
+    return sorted(out, key=lambda x: x[1])
+
+
+def running_batch(conn: sqlite3.Connection, now: datetime, rules: SendRules) -> tuple[int, datetime] | None:
+    """(batch id, when it should be done) for a real batch that has started and may still be sending."""
+    return next(((i, done) for i, start, done in _pending(conn, now, rules) if start <= now), None)
+
+
+def clash(conn: sqlite3.Connection, start: datetime, end: datetime, now: datetime, rules: SendRules) -> str:
+    """Why a batch from `start` to `end` would overlap one that is sending or scheduled ('' = it wouldn't).
+    Batches never overlap, so the gaps between emails stay what the rules say."""
+    for i, b_start, done_by in _pending(conn, now, rules):
+        if start < done_by and b_start < end + timedelta(seconds=RUN_MARGIN_S):
+            if b_start > now:
+                return (f"batch #{i} is scheduled for {b_start.astimezone(IST):%a %d %b %H:%M} IST (until about "
+                        f"{done_by.astimezone(IST):%H:%M})")
+            return f"batch #{i} may still be sending until about {done_by.astimezone(IST):%H:%M}"
+    return ""
+
+
+def scheduled_batch(conn: sqlite3.Connection, now: datetime) -> tuple[int, datetime] | None:
+    """(batch id, start) for a real batch W2 is holding until a later time."""
+    for b in conn.execute("SELECT id, scheduled_for FROM batches WHERE test_mode = 0 AND status = 'submitted'"
+                          " AND scheduled_for IS NOT NULL ORDER BY id DESC"):
+        if datetime.fromisoformat(b["scheduled_for"]) > now:
+            return b["id"], datetime.fromisoformat(b["scheduled_for"])
     return None
+
+
+def busy(conn: sqlite3.Connection, now: datetime, rules: SendRules) -> str:
+    """Why no other real batch may start: one is sending or scheduled ('' = none)."""
+    if waiting := scheduled_batch(conn, now):
+        return f"batch #{waiting[0]} is scheduled for {waiting[1].astimezone(IST):%a %d %b %H:%M} IST"
+    if running := running_batch(conn, now, rules):
+        return f"batch #{running[0]} may still be sending until about {running[1].astimezone(IST):%H:%M}"
+    return ""
+
+
+def next_window_start(now: datetime, rules: SendRules) -> datetime:
+    """The next time the sending window opens on a weekday (India time), after `now`."""
+    local = now.astimezone(IST)
+    day = local.date() if local.time() < rules.window_start else local.date() + timedelta(days=1)
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return datetime.combine(day, rules.window_start, IST)
 
 
 class BatchPlan(BaseModel):
@@ -283,11 +335,17 @@ class BatchPlan(BaseModel):
         return not self.problems
 
 
-def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetime, test_to: str) -> BatchPlan:
-    """Every rule, checked against the database as it is now. Nothing is changed here."""
+def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetime, test_to: str,
+                    start_at: datetime | None = None) -> BatchPlan:
+    """Every rule, checked against the database as it is now, for a batch starting now or at `start_at`
+    (scheduled: W2 holds it until then). Nothing is changed here."""
     rules = send_rules(conn)
     plan = BatchPlan(email_ids=email_ids)
     problems = plan.problems
+    at = start_at or now
+    if start_at is not None and not now + timedelta(minutes=1) < start_at <= now + MAX_SCHEDULE_AHEAD:
+        problems.append(f"a batch can be scheduled from a minute to {MAX_SCHEDULE_AHEAD.days} days ahead")
+        return plan
     limit = min(MAX_BATCH, rules.daily_cap)
     if not 1 <= len(email_ids) <= limit:
         problems.append(f"a real batch has 1 to {limit} emails")
@@ -319,7 +377,7 @@ def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetim
             problems.append(f"{r['template_name']} v{r['version']} has no checked test email yet (rule 2)")
 
     # One recruiter per company at a time (selection.py); follow-ups go to the same person, so they're exempt.
-    blocks, seen = selection.company_blocks(conn, now, test_to), {}
+    blocks, seen = selection.company_blocks(conn, at, test_to), {}
     for r in rows:
         if r["kind"] != "initial" or r["address"].lower() == test_to.lower():
             continue
@@ -331,39 +389,38 @@ def plan_real_batch(conn: sqlite3.Connection, email_ids: list[int], now: datetim
             problems.append(f"#{r['id']}: {r['company']} is {blocks[key].describe()}")
 
     plan.self_test = all(r["address"].lower() == test_to.lower() for r in rows)
-    local = now.astimezone(IST)
-    plan.finishes_by = now + timedelta(seconds=(len(rows) - 1) * rules.spacing_max_s)
+    local = at.astimezone(IST)
+    plan.finishes_by = at + timedelta(seconds=(len(rows) - 1) * rules.spacing_max_s)
     if not plan.self_test:
         if local.weekday() >= 5:
             problems.append("real emails go out Monday to Friday only (India time)")
         elif not rules.window_start <= local.time() < rules.window_end:
             problems.append(f"outside the sending window ({rules.window_start:%H:%M}-{rules.window_end:%H:%M} IST); "
-                            f"it's {local:%H:%M} now")
+                            + (f"it's {local:%H:%M} now" if start_at is None else f"the start is {local:%H:%M}"))
         else:
             end = datetime.combine(local.date(), rules.window_end, IST)
             if plan.finishes_by > end:
-                fits = 1 + int((end - now).total_seconds() // rules.spacing_max_s)
+                fits = 1 + int((end - at).total_seconds() // rules.spacing_max_s)
                 problems.append(f"{len(rows)} emails at up to {rules.spacing_max_s // 60} min apart could run until "
                                 f"{plan.finishes_by.astimezone(IST):%H:%M}, past the window's end at "
-                                f"{rules.window_end:%H:%M}; send at most {fits} now")
-    already = queued_today(conn, now)
+                                f"{rules.window_end:%H:%M}; send at most {fits} " + ("now" if start_at is None else "then"))
+    already = queued_today(conn, at)
     if already + len(rows) > rules.daily_cap:
-        problems.append(f"daily cap: {already} already went out today and the cap is {rules.daily_cap}, so at most "
-                        f"{max(rules.daily_cap - already, 0)} more today")
-    if running := running_batch(conn, now, rules):
-        problems.append(f"batch #{running[0]} may still be sending until about "
-                        f"{running[1].astimezone(IST):%H:%M}; one batch at a time")
+        day, verb = ("today", "went out") if start_at is None else (f"on {local:%a %d %b}", "go out")
+        problems.append(f"daily cap: {already} already {verb} {day} and the cap is {rules.daily_cap}, so at most "
+                        f"{max(rules.daily_cap - already, 0)} more {day}")
+    if reason := clash(conn, at, plan.finishes_by, now, rules):
+        problems.append(f"{reason}; batches don't overlap")
     return plan
 
 
 def unconfirmed(conn: sqlite3.Connection, now: datetime) -> tuple[int, list[int]]:
     """(emails, batch ids) that W2 should have sent by now but no reply sync has confirmed yet."""
-    rules = send_rules(conn)
-    running = running_batch(conn, now, rules)
+    pending = {i for i, _, _ in _pending(conn, now, send_rules(conn))}     # sending or scheduled: not due yet
     rows = conn.execute("SELECT e.batch_id FROM emails e JOIN batches b ON b.id = e.batch_id"
                         " WHERE e.status = 'queued' AND e.test_mode = 0 AND b.status IN ('submitted', 'stopped')"
                         ).fetchall()
-    batches = sorted({r[0] for r in rows if not running or r[0] != running[0]})
+    batches = sorted({r[0] for r in rows if r[0] not in pending})
     return sum(1 for r in rows if r[0] in batches), batches
 
 
@@ -394,34 +451,42 @@ class RealBatch(BaseModel):
 
 
 def send_real(conn: sqlite3.Connection, client: N8nClient, email_ids: list[int], *, confirmed: int,
-              test_to: str, resume: bytes, resume_name: str, now: datetime | None = None) -> RealBatch:
-    """Queue approved emails and hand them to W2 for real. `confirmed` is the number I typed."""
+              test_to: str, resume: bytes, resume_name: str, now: datetime | None = None,
+              start_at: datetime | None = None) -> RealBatch:
+    """Queue approved emails and hand them to W2 for real, to start now or at `start_at` (W2 holds a
+    scheduled batch until then). `confirmed` is the number I typed."""
     now = now or datetime.now(timezone.utc)
     if confirmed != len(email_ids):
         raise SendError(f"type the number of emails ({len(email_ids)}) to confirm")
     check_resume(resume)
-    plan = plan_real_batch(conn, email_ids, now, test_to)
+    plan = plan_real_batch(conn, email_ids, now, test_to, start_at=start_at)
     if not plan.ok:
         raise SendError("not sent: " + "; ".join(plan.problems))
     rules = send_rules(conn)
     stamp = now.isoformat(timespec="seconds")
+    start = start_at.astimezone(timezone.utc).isoformat(timespec="seconds") if start_at else None
+    queued = start or stamp       # the daily cap counts an email on the day it goes out
     rows = conn.execute(f"SELECT e.*, c.email AS address FROM emails e JOIN contacts c ON c.id = e.contact_id"
                         f" WHERE e.id IN ({','.join('?' * len(email_ids))})", email_ids).fetchall()
     rows = sorted(rows, key=lambda r: email_ids.index(r["id"]))
     with conn:   # one transaction: the batch and its queued emails exist together or not at all
-        batch_id = conn.execute("INSERT INTO batches (template_id, test_mode, status, created_at)"
-                                " VALUES (?, 0, 'draft', ?)", (rows[0]["template_id"], stamp)).lastrowid
+        batch_id = conn.execute("INSERT INTO batches (template_id, test_mode, status, created_at, scheduled_for)"
+                                " VALUES (?, 0, 'draft', ?, ?)", (rows[0]["template_id"], stamp, start)).lastrowid
         for r in rows:   # test_mode = 0 brings the database's one-email-per-contact index into force
             conn.execute("UPDATE emails SET status = 'queued', test_mode = 0, batch_id = ?, queued_at = ?"
-                         " WHERE id = ? AND status = 'approved'", (batch_id, stamp, r["id"]))
-        db.log_event(conn, "real_batch_queued", batch_id=batch_id, email_ids=email_ids, confirmed=confirmed)
+                         " WHERE id = ? AND status = 'approved'", (batch_id, queued, r["id"]))
+        db.log_event(conn, "real_batch_queued", batch_id=batch_id, email_ids=email_ids, confirmed=confirmed,
+                     scheduled_for=start)
+    emails = [{"email_id": str(r["id"]), "to": r["address"], "subject": r["subject"], "body_text": r["body_text"],
+               "body_html": to_html(r["body_text"]),
+               **({"reply_to_message_id": first_email_message(conn, r["contact_id"])}
+                  if r["kind"] == "follow_up" else {})} for r in rows]
     payload = {
         "batch_id": batch_id, "test_mode": False, "sender_name": db.get_settings(conn).get("my_name", ""),
         "spacing_min_s": rules.spacing_min_s, "spacing_max_s": rules.spacing_max_s,
-        "emails": [{"email_id": str(r["id"]), "to": r["address"], "subject": r["subject"],
-                    "body_text": r["body_text"], "body_html": to_html(r["body_text"]),
-                    **({"reply_to_message_id": first_email_message(conn, r["contact_id"])}
-                       if r["kind"] == "follow_up" else {})} for r in rows],
+        # A scheduled batch's emails go under another name: a W2 from before scheduling finds no
+        # 'emails' and refuses the batch, rather than sending it at once.
+        **({"start_at": start, "scheduled_emails": emails} if start else {"emails": emails}),
     }
     try:
         client.send_batch(payload, resume, resume_name)
@@ -433,23 +498,65 @@ def send_real(conn: sqlite3.Connection, client: N8nClient, email_ids: list[int],
             raise SendError(f"{exc} The emails stay 'queued' until you've checked: if n8n shows nothing was "
                             f"sent, release batch #{batch_id} below.") from None
         release_batch(conn, batch_id, nothing_sent_confirmed=True, reason="W2 refused the batch")
-        raise SendError(f"W2 refused the batch, nothing was sent: {exc}") from None
+        hint = (" Your W2 in n8n doesn't know scheduled batches yet: import n8n/workflows/MailMate_W2_Send.json "
+                "again (and set TEST_TO in its guard)." if start and "No emails in the batch" in str(exc) else "")
+        raise SendError(f"W2 refused the batch, nothing was sent: {exc}{hint}") from None
     with conn:
         conn.execute("UPDATE batches SET status = 'submitted', submitted_at = ? WHERE id = ?", (stamp, batch_id))
         db.log_event(conn, "real_batch_submitted", batch_id=batch_id)
     return RealBatch(batch_id=batch_id, email_ids=email_ids, finishes_by=plan.finishes_by)
 
 
-def release_batch(conn: sqlite3.Connection, batch_id: int, *, nothing_sent_confirmed: bool, reason: str = "") -> int:
-    """A failed batch's queued emails go back to approved. Only when nothing was sent."""
+def releasable_batches(conn: sqlite3.Connection, now: datetime) -> list[sqlite3.Row]:
+    """Real batches whose 'queued' emails may go back to approved, because nothing of them went out:
+    - failed: W2 refused it, or the connection broke (check n8n -> Executions first);
+    - stopped before its scheduled start: W2 was still holding it;
+    - stopped, or its time is over, and a sync since then found none of its emails in Gmail (e.g. n8n
+      was off at a scheduled start, so W2 refused to start late)."""
+    rules = send_rules(conn)
+    synced = followups.last_sync(conn)
+    running = running_batch(conn, now, rules)
+    out = []
+    for b in conn.execute("SELECT b.*, COUNT(e.id) AS n, COALESCE(SUM(e.status = 'queued'), 0) AS queued FROM batches b"
+                          " JOIN emails e ON e.batch_id = b.id WHERE b.test_mode = 0"
+                          " AND b.status IN ('failed', 'stopped', 'submitted') GROUP BY b.id ORDER BY b.id DESC"):
+        if not b["queued"]:
+            continue
+        if b["status"] == "failed":
+            out.append(b)
+            continue
+        if b["queued"] != b["n"] or (running and running[0] == b["id"] and b["status"] == "submitted"):
+            continue                                       # something went out, or it may still be sending
+        start = _start(b)
+        if b["status"] == "stopped":
+            stopped = conn.execute("SELECT MAX(created_at) FROM events WHERE kind = 'real_batch_stopped'"
+                                   " AND batch_id = ?", (b["id"],)).fetchone()[0]
+            if stopped and datetime.fromisoformat(stopped) < start:
+                out.append(b)                              # stopped while W2 was still holding it
+                continue
+            over = datetime.fromisoformat(stopped) if stopped else now
+        else:
+            over = start + timedelta(seconds=(b["n"] - 1) * rules.spacing_max_s + RUN_MARGIN_S)
+        if synced and synced > over:
+            out.append(b)
+    return out
+
+
+def release_batch(conn: sqlite3.Connection, batch_id: int, *, nothing_sent_confirmed: bool, reason: str = "",
+                  now: datetime | None = None) -> int:
+    """A batch's queued emails go back to approved. Only when nothing of it was sent (releasable_batches)."""
     if not nothing_sent_confirmed:
         raise SendError("check n8n -> Executions first and confirm that nothing was sent")
-    batch = conn.execute("SELECT status FROM batches WHERE id = ? AND test_mode = 0", (batch_id,)).fetchone()
-    if batch is None or batch["status"] != "failed":
-        raise SendError("only a failed real batch can be released")
+    now = now or datetime.now(timezone.utc)
+    batch = next((b for b in releasable_batches(conn, now) if b["id"] == batch_id), None)
+    if batch is None:
+        raise SendError("only a failed batch, a scheduled batch stopped before its time, or a batch a sync found "
+                        "nothing of can be released")
     with conn:
         n = conn.execute("UPDATE emails SET status = 'approved', test_mode = 1, batch_id = NULL, queued_at = NULL"
                          " WHERE batch_id = ? AND status = 'queued'", (batch_id,)).rowcount
+        if batch["status"] != "failed":
+            conn.execute("UPDATE batches SET status = 'stopped' WHERE id = ?", (batch_id,))
         db.log_event(conn, "real_batch_released", batch_id=batch_id, emails=n, reason=reason)
     return n
 

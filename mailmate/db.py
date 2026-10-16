@@ -26,6 +26,7 @@ EMAIL_KINDS = ("initial", "follow_up")
 BATCH_STATUSES = ("draft", "submitted", "done", "stopped", "failed")
 REPLY_CATEGORIES = ("interview_request", "not_interested", "auto_reply", "bounce", "question", "other")
 SUPPRESSION_REASONS = ("not_interested", "bounce", "opt_out", "manual")
+PIPELINE_STAGES = ("talking", "screening", "interviewing", "offer", "rejected", "withdrawn")
 
 _statuses = lambda values: ", ".join(f"'{v}'" for v in values)  # noqa: E731
 
@@ -125,6 +126,45 @@ CREATE TABLE IF NOT EXISTS applied_companies (
     applied_at   TEXT NOT NULL
 );
 
+-- After the reply: where each company stands. One row per company (company_key as in applied_companies).
+CREATE TABLE IF NOT EXISTS pipeline (
+    company_key  TEXT PRIMARY KEY,
+    company      TEXT NOT NULL,
+    stage        TEXT NOT NULL CHECK (stage IN ({_statuses(PIPELINE_STAGES)})),
+    reached      INTEGER NOT NULL DEFAULT 1,   -- furthest stage so far: 1 talking .. 4 offer
+    next_step    TEXT NOT NULL DEFAULT '',     -- e.g. 'Technical round with the ML lead'
+    next_at      TEXT,                         -- when (UTC), e.g. the interview time
+    notes        TEXT NOT NULL DEFAULT '',
+    contact_id   INTEGER REFERENCES contacts(id),
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+-- Openings watcher: the job boards I watch (one per company) and the matching openings found on them.
+CREATE TABLE IF NOT EXISTS watch_boards (
+    company_key   TEXT PRIMARY KEY,
+    company       TEXT NOT NULL,
+    kind          TEXT NOT NULL,                -- greenhouse | lever | ashby | workable | smartrecruiters | recruitee | page
+    token         TEXT NOT NULL DEFAULT '',     -- the board's name on its platform
+    url           TEXT NOT NULL,
+    source        TEXT NOT NULL DEFAULT '',     -- job link | found | by hand
+    last_checked  TEXT,
+    last_error    TEXT NOT NULL DEFAULT '',
+    last_count    INTEGER,                      -- openings on the board at the last check (any title)
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS openings (
+    id           INTEGER PRIMARY KEY,
+    company_key  TEXT NOT NULL,
+    company      TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    url          TEXT NOT NULL UNIQUE,          -- an opening is kept once, however often it's seen
+    location     TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'dismissed', 'used')),
+    first_seen   TEXT NOT NULL
+);
+
 -- Personal settings (name, signature...). Kept here, not in code, because data/ is git-ignored.
 CREATE TABLE IF NOT EXISTS settings (
     key         TEXT PRIMARY KEY,
@@ -177,6 +217,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE contacts ADD COLUMN priority TEXT NOT NULL DEFAULT ''")
     if "queued_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(emails)")}:
         conn.execute("ALTER TABLE emails ADD COLUMN queued_at TEXT")
+    if "scheduled_for" not in {r["name"] for r in conn.execute("PRAGMA table_info(batches)")}:
+        conn.execute("ALTER TABLE batches ADD COLUMN scheduled_for TEXT")    # a batch W2 holds until then (UTC)
+    replies = {r["name"] for r in conn.execute("PRAGMA table_info(replies)")}
+    for column, kind in (("handled", "TEXT NOT NULL DEFAULT ''"),      # '' | answered | no_answer_needed
+                         ("handled_at", "TEXT"),
+                         ("answer_text", "TEXT NOT NULL DEFAULT ''"),   # my answer, as saved to a Gmail draft
+                         ("gmail_draft_id", "TEXT")):
+        if column not in replies:
+            conn.execute(f"ALTER TABLE replies ADD COLUMN {column} {kind}")
 
 
 def log_event(conn: sqlite3.Connection, kind: str, *, contact_id: int | None = None,

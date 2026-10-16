@@ -4,8 +4,10 @@ then High priority.
 Recruiters at one company talk to each other. Several near-identical emails on one morning read as
 mass mailing and use up every chance at that company at once. So a company is:
 
-- waiting  while one of its recruiters has a first email queued, or sent less than
-           `follow_up_days` ago without an answer: nobody else there is emailed until then;
+- waiting  while one of its recruiters has a chance to answer: a first email queued; sent without an
+           answer less than `follow_up_days` + 4 days ago; a follow-up drafted, approved or queued;
+           or a follow-up sent less than 4 days ago. The follow-up to the first recruiter goes first,
+           so two people at one company never get an email on the same day;
 - closed   once one of its recruiters really answered (interview request, question, not interested,
            other): you're in a conversation, or they said no. Auto-replies don't count;
 - free     otherwise. A bounce frees it at once: that address was dead, try the next recruiter.
@@ -36,47 +38,73 @@ def order_key(applied: set[str]):
                       if "contact_id" in c.keys() else c["id"])
 
 
+GAP_AFTER_FOLLOW_UP_DAYS = 4     # the next recruiter at a company waits this long after a follow-up
+
+
 class CompanyBlock(BaseModel):
     company: str
     who: str
     detail: str
-    until: datetime | None = None      # waiting until this moment; None = closed
+    closed: bool = False               # someone there really answered
+    until: datetime | None = None      # waiting until this moment; None while waiting = until something happens
 
     def describe(self) -> str:
-        if self.until is None:
+        if self.closed:
             return f"closed: {self.who} already answered ({self.detail})"
-        return f"waiting on {self.who} ({self.detail}) until {(self.until + _IST_OFFSET):%d %b}"
+        if self.until is None:
+            return f"waiting on {self.who} ({self.detail})"
+        return f"waiting on {self.who} ({self.detail}) until {_day(self.until)}"
+
+    def outlasts(self, other: "CompanyBlock | None") -> bool:
+        """Whether this block keeps the company waiting longer than `other`."""
+        if other is None or self.closed:
+            return True
+        if other.closed or other.until is None:
+            return False
+        return self.until is None or self.until > other.until
 
 
 def _ts(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _day(moment: datetime) -> str:
+    return f"{moment + _IST_OFFSET:%d %b}"
+
+
 def company_blocks(conn: sqlite3.Connection, now: datetime, test_to: str) -> dict[str, CompanyBlock]:
     """Company key -> why no new first email may go there now."""
-    days = followups.follow_up_days(conn)
+    days = timedelta(days=followups.follow_up_days(conn))
+    gap = timedelta(days=GAP_AFTER_FOLLOW_UP_DAYS)
     rows = conn.execute(
-        "SELECT e.id, e.status, e.queued_at, e.sent_at, c.company, c.name, c.email FROM emails e"
-        " JOIN contacts c ON c.id = e.contact_id WHERE e.kind = 'initial' AND e.test_mode = 0"
-        " AND e.status IN ('queued', 'sent', 'replied') AND lower(c.email) != lower(?)", (test_to,)).fetchall()
+        "SELECT e.id, e.status, e.queued_at, e.sent_at, c.company, c.name, c.email, f.status AS follow_up,"
+        " f.queued_at AS follow_up_queued_at, f.sent_at AS follow_up_sent_at FROM emails e"
+        " JOIN contacts c ON c.id = e.contact_id"
+        " LEFT JOIN emails f ON f.contact_id = e.contact_id AND f.kind = 'follow_up' AND f.status != 'rejected'"
+        " WHERE e.kind = 'initial' AND e.test_mode = 0 AND e.status IN ('queued', 'sent', 'replied')"
+        " AND lower(c.email) != lower(?)", (test_to,)).fetchall()
     blocks: dict[str, CompanyBlock] = {}
     for r in rows:
-        key, who = company_key(r["company"]), r["name"] or r["email"]
+        block = CompanyBlock(company=r["company"], who=r["name"] or r["email"], detail="")
         if r["status"] == "replied":
             reply = conn.execute("SELECT category FROM replies WHERE email_id = ? AND category NOT IN"
                                  " ('auto_reply', 'bounce') ORDER BY date LIMIT 1", (r["id"],)).fetchone()
-            blocks[key] = CompanyBlock(company=r["company"], who=who,
-                                       detail=(reply[0] if reply else "a reply").replace("_", " "))
-            continue
-        if key in blocks and blocks[key].until is None:
-            continue                                         # already closed
-        since = r["sent_at"] or r["queued_at"]
-        until = _ts(since) + timedelta(days=days)
-        if r["status"] == "queued" or until > now:
-            detail = "queued" if r["status"] == "queued" else f"sent {(_ts(since) + _IST_OFFSET):%d %b}, no reply yet"
-            current = blocks.get(key)
-            if current is None or until > current.until:
-                blocks[key] = CompanyBlock(company=r["company"], who=who, detail=detail, until=until)
+            block.closed, block.detail = True, (reply[0] if reply else "a reply").replace("_", " ")
+        elif r["status"] == "queued":
+            block.detail = "queued"
+        elif r["follow_up"] in ("draft", "approved"):
+            block.detail = f"their follow-up is {'drafted' if r['follow_up'] == 'draft' else 'approved'}, not sent yet"
+        elif r["follow_up"] == "queued" and not r["follow_up_sent_at"]:
+            block.detail = "their follow-up is queued"
+        elif r["follow_up"]:
+            followed = _ts(r["follow_up_sent_at"] or r["follow_up_queued_at"])
+            block.detail, block.until = f"followed up {_day(followed)}, no reply yet", followed + gap
+        else:
+            sent = _ts(r["sent_at"] or r["queued_at"])
+            block.detail = f"sent {_day(sent)}, no reply yet; their follow-up goes first"
+            block.until = sent + days + gap
+        if (block.closed or block.until is None or block.until > now) and block.outlasts(blocks.get(company_key(r["company"]))):
+            blocks[company_key(r["company"])] = block
     return blocks
 
 

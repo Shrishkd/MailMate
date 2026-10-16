@@ -1,0 +1,152 @@
+{
+  "name": "MailMate W5 Reply alerts",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "id": "9a4f6d85-4c3b-4f10-8d84-3e0a5f4a0c00"
+    },
+    {
+      "parameters": {
+        "resource": "thread",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 50,
+        "filters": {
+          "q": "label:MailMate newer_than:3d",
+          "readStatus": "both"
+        }
+      },
+      "name": "Labelled threads",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        220,
+        300
+      ],
+      "alwaysOutputData": true,
+      "id": "9a4f6d85-4c3b-4f10-8d84-3e0a5f4a0c01"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/threads/{{ $json.id }}?format=metadata&metadataHeaders=From&metadataHeaders=Subject",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 10,
+              "batchInterval": 0
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "name": "Get thread",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "id": "9a4f6d85-4c3b-4f10-8d84-3e0a5f4a0c02"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Messages in MailMate-labelled threads that I didn't send and this workflow hasn't seen yet: one\n// alert each. The first run only remembers what's there, so old replies don't all arrive at once.\n// (Workflow static data is kept only for the published workflow, not for test runs in the editor.)\nconst INCLUDE_SNIPPET = true;    // false: an alert names only the sender and the subject\nconst state = $getWorkflowStaticData('global');\nconst first = !Array.isArray(state.seen);\nconst seen = new Set(state.seen || []);\nconst NL = String.fromCharCode(10);\nconst header = (m, name) => {\n  for (const h of (m.payload?.headers || [])) if (String(h.name).toLowerCase() === name) return String(h.value || '');\n  return '';\n};\nconst plain = s => String(s || '').split('&#39;').join(\"'\").split('&quot;').join('\"').split('&lt;').join('<')\n  .split('&gt;').join('>').split('&amp;').join('&');\nconst alerts = [];\nfor (const item of $input.all()) {\n  const t = item.json;\n  if (!t || !Array.isArray(t.messages)) continue;\n  for (const m of t.messages) {\n    if (seen.has(m.id)) continue;\n    seen.add(m.id);\n    if (first || (m.labelIds || []).includes('SENT')) continue;\n    const from = header(m, 'from');\n    const bounce = /mailer-daemon|postmaster/i.test(from);\n    const lines = [(bounce ? 'Bounce' : 'New reply') + ' (MailMate)', 'From: ' + from, 'Subject: ' + header(m, 'subject')];\n    if (INCLUDE_SNIPPET && m.snippet) lines.push('', plain(m.snippet).slice(0, 300));\n    lines.push('', bounce ? 'The address is dead: the next sync puts it on the do-not-contact list.'\n                          : 'Open MailMate -> 6 Replies -> Reply desk to answer it.');\n    alerts.push({ json: { text: lines.join(NL) } });\n  }\n}\nstate.seen = Array.from(seen).slice(-2000);\nreturn alerts;\n"
+      },
+      "name": "New replies",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "id": "9a4f6d85-4c3b-4f10-8d84-3e0a5f4a0c03"
+    },
+    {
+      "parameters": {
+        "chatId": "REPLACE_WITH_YOUR_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        300
+      ],
+      "id": "9a4f6d85-4c3b-4f10-8d84-3e0a5f4a0c04"
+    }
+  ],
+  "connections": {
+    "Every 15 minutes": {
+      "main": [
+        [
+          {
+            "node": "Labelled threads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Labelled threads": {
+      "main": [
+        [
+          {
+            "node": "Get thread",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get thread": {
+      "main": [
+        [
+          {
+            "node": "New replies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New replies": {
+      "main": [
+        [
+          {
+            "node": "Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

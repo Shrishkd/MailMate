@@ -21,7 +21,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Safety checks before anything is sent. Any failure stops the whole batch with an error,\n// and because this runs before 'Respond to Webhook', MailMate shows that error.\nconst TEST_TO = 'REPLACE_WITH_YOUR_TEST_ADDRESS';  // your secondary inbox (MAILMATE_TEST_ADDRESS in .env)\nconst REAL_SENDING_ENABLED = true;                 // Step 7: real batches allowed (MailMate checks cap, window, approval)\nconst MAX_BATCH = 20;                              // daily cap\n\nif (TEST_TO.startsWith('REPLACE')) throw new Error('Set TEST_TO at the top of the Explode + guard node first');\nconst wh = $('Webhook').first();\nlet payload;\ntry { payload = JSON.parse(wh.json.body.payload); } catch (err) { throw new Error('payload is not valid JSON'); }\nconst testMode = payload.test_mode === true;\nconst emails = payload.emails;\nif (!Array.isArray(emails) || emails.length === 0) throw new Error('No emails in the batch');\nif (emails.length > MAX_BATCH) throw new Error(`Batch of ${emails.length} is larger than ${MAX_BATCH} - refused`);\nif (!testMode && !REAL_SENDING_ENABLED) throw new Error('Real sending is not enabled in W2 yet (test mode only)');\n\n// The resume: whatever name n8n gave the uploaded file, pass it on as `resume`.\nconst files = wh.binary || {};\nconst key = Object.keys(files)[0];\nif (!key) throw new Error('No resume file received');\nconst resume = files[key];\nif (resume.mimeType && resume.mimeType !== 'application/pdf') throw new Error(`Resume must be a PDF, got ${resume.mimeType}`);\n\n// Spacing between sends, with a floor so a bad payload can't send in a burst.\nconst min = Math.max(Number(payload.spacing_min_s) || 180, testMode ? 30 : 120);\nconst max = Math.max(Number(payload.spacing_max_s) || 420, min);\n\nreturn emails.map(e => {\n  const to = String(e.to || '').trim().toLowerCase();\n  if (testMode && to !== TEST_TO.toLowerCase()) throw new Error(`Test mode may only send to the test address, got ${to}`);\n  if (!to || !e.subject || !e.body_text || !e.body_html) throw new Error(`Email ${e.email_id} is missing to, subject, body_text or body_html`);\n  return {\n    json: {\n      email_id: e.email_id, to, subject: e.subject, body_text: e.body_text, body_html: e.body_html,\n      test_mode: testMode, batch_id: payload.batch_id, sender_name: payload.sender_name || '',\n      spacing_min_s: min, spacing_max_s: max, reply_to_message_id: e.reply_to_message_id || '',\n    },\n    binary: { resume },\n  };\n});"
+        "jsCode": "// Safety checks before anything is sent. Any failure stops the whole batch with an error,\n// and because this runs before 'Respond to Webhook', MailMate shows that error.\nconst TEST_TO = 'REPLACE_WITH_YOUR_TEST_ADDRESS';  // your secondary inbox (MAILMATE_TEST_ADDRESS in .env)\nconst REAL_SENDING_ENABLED = true;                 // Step 7: real batches allowed (MailMate checks cap, window, approval)\nconst MAX_BATCH = 20;                              // daily cap\n\nif (TEST_TO.startsWith('REPLACE')) throw new Error('Set TEST_TO at the top of the Explode + guard node first');\nconst wh = $('Webhook').first();\nlet payload;\ntry { payload = JSON.parse(wh.json.body.payload); } catch (err) { throw new Error('payload is not valid JSON'); }\nconst testMode = payload.test_mode === true;\n// A scheduled batch carries its emails as `scheduled_emails`, so a W2 from before scheduling (which\n// reads only `emails`) refuses it instead of sending it at once.\nif (payload.start_at && payload.emails) throw new Error('A scheduled batch must carry scheduled_emails, not emails');\nif (!payload.start_at && payload.scheduled_emails) throw new Error('scheduled_emails without a start_at');\nconst emails = payload.start_at ? payload.scheduled_emails : payload.emails;\nif (!Array.isArray(emails) || emails.length === 0) throw new Error('No emails in the batch');\nif (emails.length > MAX_BATCH) throw new Error(`Batch of ${emails.length} is larger than ${MAX_BATCH} - refused`);\nif (!testMode && !REAL_SENDING_ENABLED) throw new Error('Real sending is not enabled in W2 yet (test mode only)');\n\n// The resume: whatever name n8n gave the uploaded file, pass it on as `resume`.\nconst files = wh.binary || {};\nconst key = Object.keys(files)[0];\nif (!key) throw new Error('No resume file received');\nconst resume = files[key];\nif (resume.mimeType && resume.mimeType !== 'application/pdf') throw new Error(`Resume must be a PDF, got ${resume.mimeType}`);\n\n// A scheduled batch: W2 holds it until start_at (MailMate checked the window, weekday and cap for then).\nlet startAt = '';\nif (payload.start_at) {\n  if (testMode) throw new Error('Test batches are never scheduled');\n  const t = Date.parse(payload.start_at);\n  if (isNaN(t)) throw new Error('start_at is not a date');\n  if (t < Date.now() - 2 * 60 * 1000 || t > Date.now() + 4 * 24 * 3600 * 1000) {\n    throw new Error('start_at must be within the next 4 days');\n  }\n  startAt = new Date(t).toISOString();\n}\n\n// Spacing between sends, with a floor so a bad payload can't send in a burst.\nconst min = Math.max(Number(payload.spacing_min_s) || 180, testMode ? 30 : 120);\nconst max = Math.max(Number(payload.spacing_max_s) || 420, min);\n\nreturn emails.map(e => {\n  const to = String(e.to || '').trim().toLowerCase();\n  if (testMode && to !== TEST_TO.toLowerCase()) throw new Error(`Test mode may only send to the test address, got ${to}`);\n  if (!to || !e.subject || !e.body_text || !e.body_html) throw new Error(`Email ${e.email_id} is missing to, subject, body_text or body_html`);\n  return {\n    json: {\n      email_id: e.email_id, to, subject: e.subject, body_text: e.body_text, body_html: e.body_html,\n      test_mode: testMode, batch_id: payload.batch_id, sender_name: payload.sender_name || '',\n      spacing_min_s: min, spacing_max_s: max, reply_to_message_id: e.reply_to_message_id || '', start_at: startAt,\n    },\n    binary: { resume },\n  };\n});"
       },
       "id": "6d1c3a52-1f0e-4c8e-9a51-0b7e2f1c0a02",
       "name": "Explode + guard",
@@ -209,6 +209,68 @@
         120
       ],
       "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5c2d7e9a-1b3f-4c6d-8e0a-2f4b6d8e0c11",
+              "leftValue": "={{ $json.start_at }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6d1c3a52-1f0e-4c8e-9a51-0b7e2f1c0a20",
+      "name": "Scheduled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "specificTime",
+        "dateTime": "={{ $json.start_at }}"
+      },
+      "id": "6d1c3a52-1f0e-4c8e-9a51-0b7e2f1c0a21",
+      "name": "Wait until start",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        600
+      ],
+      "webhookId": "6d1c3a52-1f0e-4c8e-9a51-0b7e2f1c0a98"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n holds a scheduled batch while it waits. If n8n was off at the start time, it resumes the wait\n// as soon as it's back: hours late, maybe at night. Then send nothing; MailMate can release the batch.\nconst first = $input.first().json;\nconst late = Date.now() - Date.parse(first.start_at);\nif (late > 30 * 60 * 1000) {\n  throw new Error(`Batch ${first.batch_id} would start ${Math.round(late / 60000)} min late (was n8n off?): nothing sent. ` +\n                  'Sync replies in MailMate, then release the batch on 5 Send -> Batches and schedule it again.');\n}\nreturn $input.all();\n"
+      },
+      "id": "6d1c3a52-1f0e-4c8e-9a51-0b7e2f1c0a22",
+      "name": "Still on time?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        600
+      ]
     }
   ],
   "connections": {
@@ -238,7 +300,7 @@
       "main": [
         [
           {
-            "node": "Loop Over Items",
+            "node": "Scheduled?",
             "type": "main",
             "index": 0
           }
@@ -363,6 +425,46 @@
         [
           {
             "node": "Wait random gap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scheduled?": {
+      "main": [
+        [
+          {
+            "node": "Wait until start",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait until start": {
+      "main": [
+        [
+          {
+            "node": "Still on time?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still on time?": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
             "type": "main",
             "index": 0
           }

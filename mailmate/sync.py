@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel
 
-from mailmate import db
+from mailmate import db, pipeline
 from mailmate.n8n import SyncResult, SyncThread
 
 SUPPRESS_CONFIDENCE = 0.6
@@ -50,6 +50,7 @@ class SyncReport(BaseModel):
     unknown_threads: list[str] = []     # labelled threads MailMate didn't queue (e.g. labelled by hand)
     not_found: list[str] = []           # queued long ago, still no thread in Gmail
     batches_done: list[int] = []
+    pipeline_added: list[str] = []      # companies that asked for an interview or asked a question
 
 
 def _parse(ts: str) -> datetime:
@@ -177,6 +178,7 @@ def apply_sync(conn: sqlite3.Connection, result: SyncResult, test_to: str, now: 
                 if now > deadline:
                     report.not_found += queued
 
+    report.pipeline_added = pipeline.add_from_replies(conn, test_to)
     with conn:
         db.log_event(conn, "sync_done", threads=report.threads, replies=len(report.new_replies))
 
